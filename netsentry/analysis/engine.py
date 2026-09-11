@@ -44,8 +44,12 @@ class SecurityAnalyzer:
         )
         checks: list[SecurityCheckResult] = []
         findings: list[Finding] = []
+        unimplemented_services = 0
         for service in result.services:
             check = dispatch_service_check(self.checks, result, service)
+            if check is None:
+                unimplemented_services += 1
+                continue
             try:
                 check_result = check.run(result, service)
             except Exception as exc:
@@ -66,7 +70,7 @@ class SecurityAnalyzer:
         if result.reachability is False:
             status = AssessmentStatus.UNREACHABLE
             reason = "The target was not reachable during enumeration."
-        elif any(check.status in {CheckStatus.UNAVAILABLE, CheckStatus.FAILED} for check in checks):
+        elif any(check.status in {CheckStatus.UNAVAILABLE, CheckStatus.FAILED, CheckStatus.INCONCLUSIVE} for check in checks):
             status = AssessmentStatus.LIMITED
             reason = "One or more service-specific security checks were unavailable or failed."
         elif not result.services and result.scan_profile != "full":
@@ -87,6 +91,7 @@ class SecurityAnalyzer:
             requested_ports=result.requested_ports,
             reachability=result.reachability,
             probe_status=result.probe_status,
+            unimplemented_services=unimplemented_services,
         )
 
 

@@ -6,11 +6,25 @@ import time
 from collections import Counter
 
 from .analysis import Severity, assess_scan_result
-from .discovery import DiscoveryError, discover_devices, get_local_network
+from .discovery import (
+    DiscoveryError,
+    discover_devices,
+    get_local_network,
+    load_current_snapshot,
+    save_current_snapshot,
+)
 from .ip import ip_visibility
 from .scanning import NmapNotInstalledError, NmapScanError, scan_target
 
 logger = logging.getLogger(__name__)
+
+
+def _yes_no_unknown(value: bool | None) -> str:
+    if value is True:
+        return "Yes"
+    if value is False:
+        return "No"
+    return "Unknown"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -113,10 +127,33 @@ def _print_assessment(assessment) -> None:
         print("No open TCP services were detected within scan coverage.")
     print()
     print("Security Checks")
+    if not assessment.checks:
+        print("No applicable service-specific checks were available.")
     for check in assessment.checks:
         print(f"{check.title}: {check.status.value}")
         if check.reason:
             print(f"  {check.reason}")
+        if check.details:
+            if check.title == "SMB configuration":
+                details = check.details
+                print(f"  Negotiated dialect: {details.get('dialect') or 'Unknown'}")
+                print(f"  SMBv1 supported: {_yes_no_unknown(details.get('smb1_supported'))}")
+                print(f"  Signing supported: {_yes_no_unknown(details.get('signing_supported'))}")
+                print(f"  Signing required: {_yes_no_unknown(details.get('signing_required'))}")
+                print(f"  Authentication: {details.get('authentication_status', 'Unknown')}")
+                if details.get("identity"):
+                    print(f"  Server identity: {details['identity']}")
+            elif check.title == "TLS configuration":
+                details = check.details
+                print(f"  TLS version: {details.get('tls_version') or 'Unavailable'}")
+                print(f"  Cipher: {details.get('cipher') or 'Unavailable'}")
+                print(f"  Subject: {details.get('subject') or 'Unavailable'}")
+                print(f"  Issuer: {details.get('issuer') or 'Unavailable'}")
+                print(f"  Valid from: {details.get('not_before') or 'Unavailable'}")
+                print(f"  Valid until: {details.get('not_after') or 'Unavailable'}")
+                print(f"  Verification: {details.get('verification_result') or 'Unavailable'}")
+                print(f"  Expired: {_yes_no_unknown(details.get('expired'))}")
+                print(f"  Not yet valid: {_yes_no_unknown(details.get('not_yet_valid'))}")
     print()
     print("Assessment Coverage")
     coverage = assessment.coverage
@@ -124,6 +161,8 @@ def _print_assessment(assessment) -> None:
     print(f"Security checks attempted: {coverage.checks_attempted}")
     print(f"Checks completed: {coverage.checks_completed}")
     print(f"Checks unavailable/failed: {coverage.checks_unavailable_or_failed}")
+    if assessment.unimplemented_services:
+        print(f"{assessment.unimplemented_services} observed services currently have no registered assessment module.")
     print()
     print(f"Findings: {len(assessment.findings)}")
     if not assessment.findings:
@@ -201,7 +240,8 @@ def _run_discovery(args: argparse.Namespace) -> int:
         network = ipaddress.IPv4Network(args.network) if args.network else target.network
         logging.info("Starting discovery on %s via %s", network, target.interface)
         devices = discover_devices(network, target.interface, timeout=args.timeout)
-    except (DiscoveryError, ValueError) as exc:
+        save_current_snapshot(devices)
+    except (DiscoveryError, OSError, ValueError) as exc:
         print(f"Discovery failed: {exc}")
         return 1
 
@@ -212,11 +252,9 @@ def _run_discovery(args: argparse.Namespace) -> int:
 def _run_scan(args: argparse.Namespace) -> int:
     if args.discovered:
         try:
-            target = get_local_network(args.interface)
-            network = ipaddress.IPv4Network(args.network) if args.network else target.network
-            devices = discover_devices(network, target.interface, timeout=args.timeout)
+            devices = load_current_snapshot()
             targets = [device.ip for device in devices]
-        except (DiscoveryError, ValueError) as exc:
+        except (DiscoveryError, FileNotFoundError, ValueError) as exc:
             print(f"Discovery failed: {exc}")
             return 1
 
@@ -265,11 +303,9 @@ def _run_scan(args: argparse.Namespace) -> int:
 def _run_assess(args: argparse.Namespace) -> int:
     if args.discovered:
         try:
-            target = get_local_network(args.interface)
-            network = ipaddress.IPv4Network(args.network) if args.network else target.network
-            devices = discover_devices(network, target.interface, timeout=args.timeout)
+            devices = load_current_snapshot()
             targets = [device.ip for device in devices]
-        except (DiscoveryError, ValueError) as exc:
+        except (DiscoveryError, FileNotFoundError, ValueError) as exc:
             if args.json:
                 print(json.dumps({"error": str(exc)}))
             else:

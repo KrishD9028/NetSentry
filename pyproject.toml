@@ -9,6 +9,7 @@ description = "Authorized network security assessment platform"
 requires-python = ">=3.11"
 dependencies = [
     "scapy>=2.5.0",
+    "smbprotocol>=1.17.0",
 ]
 
 [project.scripts]

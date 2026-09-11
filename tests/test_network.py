@@ -8,10 +8,25 @@ from netsentry.discovery.network import (
     _vendor_for,
     get_local_network,
 )
+from netsentry.discovery.snapshot import load_current_snapshot, save_current_snapshot
+from netsentry.discovery.models import Device
 from netsentry.ip import IPClassification, classify_ip, ip_visibility, labeled_ip
 
 
 class NetworkParsingTests(unittest.TestCase):
+    def test_current_snapshot_replaces_previous_devices(self) -> None:
+        with self.subTest("snapshot replacement"):
+            from tempfile import TemporaryDirectory
+
+            with TemporaryDirectory() as directory:
+                from pathlib import Path
+
+                path = Path(directory) / "current.json"
+                save_current_snapshot([Device("100.100.201.202", None, None, "Unknown")], path)
+                save_current_snapshot([Device("100.100.201.201", None, None, "Unknown")], path)
+                devices = load_current_snapshot(path)
+
+        self.assertEqual([device.ip for device in devices], ["100.100.201.201"])
     def test_rfc1918_private_ranges_and_boundaries(self) -> None:
         for address in ("10.0.0.1", "10.255.255.254", "172.16.0.1", "172.31.255.254", "192.168.0.1", "192.168.255.254"):
             self.assertEqual(classify_ip(address), IPClassification.PRIVATE)

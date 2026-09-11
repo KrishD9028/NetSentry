@@ -1,5 +1,9 @@
 import json
+import logging
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 
 from netsentry.analysis import (
     AssessmentStatus,
@@ -12,8 +16,10 @@ from netsentry.analysis import (
     Severity,
     assess_scan_result,
 )
-from netsentry.analysis.checks import ServiceCheck
+from netsentry.analysis.checks import SMBConfigurationCheck, ServiceCheck, TLSConfigurationCheck
 from netsentry.analysis.models import CheckStatus, SecurityCheckResult
+from netsentry.analysis.probes import ProbeError, SMBProbeData, TLSProbeData, _decode_peer_certificate, probe_smb
+from netsentry.main import _print_assessment
 from netsentry.scanning.models import HostScanResult, PortService
 
 
@@ -102,7 +108,7 @@ class SecurityRuleTests(unittest.TestCase):
         assessment = assess_scan_result(result)
         self.assertEqual(len(assessment.observations), 5)
         self.assertEqual(assessment.findings, ())
-        self.assertEqual(assessment.status, AssessmentStatus.LIMITED)
+        self.assertEqual(assessment.status, AssessmentStatus.COMPLETE)
 
     def test_http_and_unknown_services_are_detected(self) -> None:
         result = HostScanResult(
@@ -112,12 +118,16 @@ class SecurityRuleTests(unittest.TestCase):
         assessment = assess_scan_result(result)
         self.assertEqual(assessment.findings, ())
         self.assertEqual(len(assessment.observations), 2)
-        self.assertEqual(assessment.coverage.checks_attempted, 2)
+        self.assertEqual(assessment.coverage.checks_attempted, 1)
         self.assertEqual(assessment.risk_level, RiskLevel.UNKNOWN)
 
     def test_tls_service_does_not_trigger_http_rule(self) -> None:
+        def failing_tls_probe(host, port):
+            raise ProbeError("TLS handshake failed")
+
         assessment = assess_scan_result(
-            HostScanResult(target="192.168.1.20", services=[service(443, "https")])
+            HostScanResult(target="192.168.1.20", services=[service(443, "https")]),
+            checks=[TLSConfigurationCheck(failing_tls_probe)],
         )
         self.assertEqual(assessment.findings, ())
         self.assertEqual(assessment.risk_level, RiskLevel.UNKNOWN)
@@ -155,6 +165,111 @@ class SecurityRuleTests(unittest.TestCase):
 
 
 class AssessmentSerializationTests(unittest.TestCase):
+    def test_smb_probe_success_reports_signing_and_dialect(self) -> None:
+        check = SMBConfigurationCheck(lambda host, port: SMBProbeData("SMB 3.1.1", False, True, False, "WORKGROUP", "Not required for protocol negotiation"))
+        result = check.run(HostScanResult(target="100.100.201.201"), service(445, "microsoft-ds"))
+        self.assertEqual(result.status, CheckStatus.COMPLETED)
+        self.assertEqual(result.details["dialect"], "SMB 3.1.1")
+        self.assertEqual(result.details["signing_required"], False)
+        self.assertEqual(result.details["authentication_status"], "Not required for protocol negotiation")
+        self.assertIn("Dialect: SMB 3.1.1", result.reason)
+        self.assertIn("Signing required: No", result.reason)
+
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_assessment(assess_scan_result(
+                HostScanResult(target="100.100.201.201", services=[service(445, "smb")], scan_profile="full"),
+                checks=[check],
+            ))
+        self.assertIn("Negotiated dialect: SMB 3.1.1", output.getvalue())
+        self.assertIn("Signing required: No", output.getvalue())
+        self.assertEqual(result.findings[0].title, "SMB signing is not required")
+
+    def test_smb_signing_required_and_smbv1_disabled_have_no_findings(self) -> None:
+        check = SMBConfigurationCheck(lambda host, port: SMBProbeData("SMB 3.1.1", False, True, True, "server", "Not required for protocol negotiation"))
+        result = check.run(HostScanResult(target="100.100.201.201"), service(445, "smb"))
+        self.assertEqual(result.status, CheckStatus.COMPLETED)
+        self.assertEqual(result.findings, ())
+        self.assertFalse(result.details["smb1_supported"])
+        self.assertTrue(result.details["signing_required"])
+
+    def test_smb_probe_failure_is_explicit(self) -> None:
+        def failing_probe(host, port):
+            raise ProbeError("SMB probe failed")
+
+        result = SMBConfigurationCheck(failing_probe).run(
+            HostScanResult(target="100.100.201.201"), service(445, "smb")
+        )
+        self.assertEqual(result.status, CheckStatus.FAILED)
+
+    def test_tls_probe_success_and_certificate_findings(self) -> None:
+        valid = TLSProbeData("TLSv1.3", "TLS_AES_256_GCM_SHA384", "service.local", "Test CA", "Jan 01 00:00:00 2025 GMT", "Jan 01 00:00:00 2099 GMT", False, False, 200, {"strict-transport-security": "max-age=1"}, "not performed (certificate verification disabled for observation)")
+        result = TLSConfigurationCheck(lambda host, port: valid).run(
+            HostScanResult(target="100.100.201.202"), service(8443, "https-alt")
+        )
+        self.assertEqual(result.status, CheckStatus.COMPLETED)
+        self.assertEqual(result.details["tls_version"], "TLSv1.3")
+        self.assertEqual(result.details["subject"], "service.local")
+        self.assertEqual(result.details["issuer"], "Test CA")
+        self.assertEqual(result.details["not_before"], "Jan 01 00:00:00 2025 GMT")
+        self.assertIn("certificate verification disabled", result.details["verification_result"])
+        self.assertEqual(result.findings, ())
+
+    def test_undecodable_tls_certificate_is_explicit(self) -> None:
+        self.assertEqual(_decode_peer_certificate(b"not-a-certificate"), {})
+
+    @patch("netsentry.analysis.probes.logging.getLogger")
+    @patch("smbprotocol.connection.Connection")
+    def test_smbprobe_suppresses_library_logs(self, mock_connection, mock_get_logger) -> None:
+        connection = mock_connection.return_value
+        connection.dialect = 0x0311
+        connection.server_security_mode = 3
+        connection.server_guid = "server-guid"
+        data = probe_smb("100.100.201.201")
+        self.assertEqual(data.dialect, "SMB 3.1.1")
+        mock_get_logger.assert_any_call("smbprotocol")
+        self.assertTrue(mock_get_logger.return_value.setLevel.called)
+
+    def test_unimplemented_observed_service_does_not_limit_complete_assessment(self) -> None:
+        check = SMBConfigurationCheck(lambda host, port: SMBProbeData("SMB 3.1.1", False, True, True))
+        assessment = assess_scan_result(
+            HostScanResult(
+                target="100.100.201.201",
+                services=[service(445, "smb"), service(135, "msrpc")],
+                scan_profile="full",
+            ),
+            checks=[check],
+        )
+        self.assertEqual(assessment.status, AssessmentStatus.COMPLETE)
+        self.assertEqual(assessment.unimplemented_services, 1)
+        self.assertEqual(assessment.coverage.checks_unavailable_or_failed, 0)
+
+    def test_expired_tls_certificate_is_reported(self) -> None:
+        expired = TLSProbeData("TLSv1.2", "AES256", "old.local", "Old CA", "Jan 01 00:00:00 2020 GMT", "Jan 01 00:00:00 2021 GMT", True, False)
+        result = TLSConfigurationCheck(lambda host, port: expired).run(
+            HostScanResult(target="100.100.201.202"), service(443, "https")
+        )
+        self.assertEqual(result.status, CheckStatus.COMPLETED)
+        self.assertEqual(result.findings[0].title, "Expired TLS certificate")
+
+    def test_non_tls_service_on_8443_is_inconclusive(self) -> None:
+        def non_tls_probe(host, port):
+            raise ProbeError("TLS handshake failed: server does not speak TLS")
+
+        result = TLSConfigurationCheck(non_tls_probe).run(
+            HostScanResult(target="100.100.201.202"), service(8443, "https-alt")
+        )
+        self.assertEqual(result.status, CheckStatus.INCONCLUSIVE)
+
+    def test_tls_connection_failure_is_failed(self) -> None:
+        def failed_tls_probe(host, port):
+            raise ProbeError("connection refused")
+
+        result = TLSConfigurationCheck(failed_tls_probe).run(
+            HostScanResult(target="100.100.201.202"), service(8443, "https-alt")
+        )
+        self.assertEqual(result.status, CheckStatus.FAILED)
+
     def test_failed_service_probe_produces_limited_assessment(self) -> None:
         assessment = assess_scan_result(
             HostScanResult(target="192.168.1.20", services=[service(445, "smb")]),

@@ -40,6 +40,7 @@ class CheckStatus(str, Enum):
     COMPLETED = "COMPLETED"
     UNAVAILABLE = "UNAVAILABLE"
     FAILED = "FAILED"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 class RiskLevel(str, Enum):
@@ -122,6 +123,7 @@ class SecurityCheckResult:
     service: str | None = None
     reason: str = ""
     findings: tuple[Finding, ...] = ()
+    details: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +134,7 @@ class SecurityCheckResult:
             "protocol": self.protocol,
             "service": self.service,
             "reason": self.reason,
+            "details": self.details or {},
             "findings": [finding.to_dict() for finding in self.findings],
         }
 
@@ -164,6 +167,7 @@ class HostAssessment:
     requested_ports: tuple[int, ...] = ()
     reachability: bool | None = None
     probe_status: str = "unknown"
+    unimplemented_services: int = 0
 
     @property
     def risk_score(self) -> int | None:
@@ -185,7 +189,10 @@ class HostAssessment:
     @property
     def coverage(self) -> AssessmentCoverage:
         completed = sum(check.status is CheckStatus.COMPLETED for check in self.checks)
-        unavailable = len(self.checks) - completed
+        unavailable = sum(
+            check.status in {CheckStatus.UNAVAILABLE, CheckStatus.FAILED, CheckStatus.INCONCLUSIVE}
+            for check in self.checks
+        )
         return AssessmentCoverage(len(self.observations), len(self.checks), completed, unavailable)
 
     def to_dict(self) -> dict[str, Any]:
@@ -198,6 +205,7 @@ class HostAssessment:
             "requested_ports": list(self.requested_ports),
             "reachability": self.reachability,
             "probe_status": self.probe_status,
+            "unimplemented_services": self.unimplemented_services,
             "risk": {
                 "severity": self.risk_level.value,
                 "score": self.risk_score,

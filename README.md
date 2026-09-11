@@ -41,6 +41,8 @@ netsentry discover --timeout 5
 
 Discovery displays classified addresses such as `Private IP`, `Shared/CGNAT IP`, or `Public IP`, plus MAC, hostname, and best-effort vendor information.
 
+Each successful `discover` run atomically replaces `~/.netsentry/current_discovery.json`. The `--discovered` forms of `scan` and `assess` read only that current snapshot; they do not perform a new discovery and do not merge historical hosts. Run `netsentry discover` again to refresh it.
+
 Scan one authorized host:
 
 ```sh
