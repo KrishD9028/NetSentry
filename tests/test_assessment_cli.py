@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from netsentry.main import _build_parser, _run_assess, _run_discovery, _run_scan
 from netsentry.discovery.models import Device, NetworkTarget
-from netsentry.scanning.models import HostScanResult, PortService
+from netsentry.scanning.models import HostScanResult, PortService, ServiceIdentity
 from ipaddress import IPv4Network
 
 
@@ -45,7 +45,7 @@ class AssessmentCliTests(unittest.TestCase):
     def test_single_assessment_json_is_valid(self, mock_scan) -> None:
         mock_scan.return_value = HostScanResult(
             target="192.168.1.20",
-            services=[PortService(port=23, protocol="tcp", state="open", service="telnet")],
+            services=[PortService(port=23, protocol="tcp", state="open", service="telnet", identities=(ServiceIdentity("telnet", "fixture protocol evidence", {"banner": "telnet"}),))],
         )
         args = _build_parser().parse_args(["assess", "192.168.1.20", "--json"])
         output = StringIO()

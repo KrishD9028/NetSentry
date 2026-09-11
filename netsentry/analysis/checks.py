@@ -1,8 +1,10 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 import re
+import inspect
+from dataclasses import asdict, replace
 
-from ..scanning.models import HostScanResult, PortService
+from ..scanning.models import HostScanResult, PortService, ServiceIdentity
 from .models import CheckStatus, Confidence, Finding, SecurityCheckResult, Severity
 from .probes import ProbeError, SMBProbeData, TLSProbeData, probe_smb, probe_tls
 from .service_probes import DNSProbeData, HTTPProbeData, RDPProbeData, SSHProbeData, probe_dns, probe_http, probe_rdp, probe_ssh
@@ -40,7 +42,7 @@ class UnavailableServiceCheck(ServiceCheck):
             status=CheckStatus.UNAVAILABLE,
             port=service.port,
             protocol=service.protocol,
-            service=service.service,
+            service=service.confirmed_service,
             reason=self.reason,
         )
 
@@ -63,7 +65,7 @@ class CompletedNoFindingCheck(ServiceCheck):
             status=CheckStatus.COMPLETED,
             port=service.port,
             protocol=service.protocol,
-            service=service.service,
+            service=service.confirmed_service,
             reason="Check completed; no confirmed security finding was generated.",
         )
 
@@ -88,27 +90,102 @@ class ConfirmedFindingCheck(ServiceCheck):
             status=CheckStatus.COMPLETED,
             port=service.port,
             protocol=service.protocol,
-            service=service.service,
+            service=service.confirmed_service,
             findings=(finding,),
             reason="Check completed with confirmed evidence.",
         )
 
 
-class SMBConfigurationCheck(ServiceCheck):
+class ProtocolServiceCheck(ServiceCheck):
+    """Collect protocol evidence separately from evaluating security settings."""
+
+    protocol_name: str
+    hint_ports: frozenset[int] = frozenset()
+    hint_names: frozenset[str] = frozenset()
+
+    def matches(self, service: PortService) -> bool:
+        return service.protocol == "tcp" and self.protocol_name in service.confirmed_protocols
+
+    def candidate(self, service: PortService) -> bool:
+        if service.state != "open" or service.protocol != "tcp":
+            return False
+        if self.matches(service):
+            return False  # Existing protocol evidence already permits dispatch.
+        if service.confirmed_protocols:
+            return self.protocol_name == "http" and service.confirmed_protocols == ("tls",)
+        if self.protocol_name == "ssh":
+            # One passive banner read also recognizes SSH on unconventional ports.
+            return True
+        hint = (service.service_hint or "").lower()
+        return service.port in self.hint_ports or hint in self.hint_names or (
+            self.protocol_name == "http" and hint.startswith("http-")
+        )
+
+    def collect(self, result: HostScanResult, service: PortService):
+        options = {"port": service.port}
+        if self.protocol_name == "http":
+            options["tls"] = "tls" in service.confirmed_protocols or (
+                not service.confirmed_protocols and (
+                    service.port in {443, 8443} or service.service_hint in {"https", "https-alt", "ssl"}
+                )
+            )
+        elif self.protocol_name == "dns":
+            options["transport"] = service.protocol
+        elif self.protocol_name == "ssh" and service.port != 22 and service.service_hint != "ssh":
+            options["timeout"] = 1.0
+        # Compatibility with injected probes, without retrying after TypeError.
+        parameters = inspect.signature(self.probe).parameters
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            options = {key: value for key, value in options.items() if key in parameters}
+        return self.probe(result.target, **options)
+
+    @abstractmethod
+    def protocol_demonstrated(self, data) -> bool:
+        """Only positive protocol responses can establish identity."""
+
+
+def identify_for_checks(checks, result: HostScanResult, service: PortService):
+    """Prepare evidence and cache successful probe data for subsequent checks."""
+    collected = {}
+    attempts = list(service.identification_attempts)
+    for check in checks:
+        if not isinstance(check, ProtocolServiceCheck) or not check.candidate(service):
+            continue
+        try:
+            data = check.collect(result, service)
+            if not check.protocol_demonstrated(data):
+                raise ProbeError("Response did not demonstrate the expected protocol.")
+            identity = ServiceIdentity(check.protocol_name, f"NetSentry {check.protocol_name.upper()} probe", asdict(data))
+            identities = service.identities + (identity,)
+            if check.protocol_name == "http" and data.tls and "tls" not in service.confirmed_protocols:
+                identities += (ServiceIdentity("tls", "NetSentry HTTP TLS handshake", {"tls": True}),)
+            service = replace(service, identities=identities)
+            collected[check] = data
+            attempts.append({"protocol": check.protocol_name, "status": "CONFIRMED", "source": identity.source})
+        except Exception as exc:
+            attempts.append({"protocol": check.protocol_name, "status": "INCONCLUSIVE", "reason": str(exc)})
+    return replace(service, identification_attempts=tuple(attempts)), collected
+
+
+class SMBConfigurationCheck(ProtocolServiceCheck):
+    protocol_name = "smb"
+    hint_ports = frozenset({445})
+    hint_names = frozenset({"smb", "microsoft-ds"})
+
+    def protocol_demonstrated(self, data) -> bool:
+        return bool(data.dialect)
+
     check_id = "NS-CHECK-SMB"
     title = "SMB configuration"
 
     def __init__(self, probe: Callable[..., SMBProbeData] = probe_smb) -> None:
         self.probe = probe
 
-    def matches(self, service: PortService) -> bool:
-        return service.protocol == "tcp" and (service.port == 445 or _service_name(service) in {"smb", "microsoft-ds"})
-
-    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+    def run(self, result: HostScanResult, service: PortService, *, data=None) -> SecurityCheckResult:
         try:
-            data = self.probe(result.target, port=service.port)
+            data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
-            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
 
         findings: list[Finding] = []
         if data.smb1_supported is True:
@@ -121,7 +198,7 @@ class SMBConfigurationCheck(ServiceCheck):
                 host=result.target,
                 port=service.port,
                 protocol=service.protocol,
-                service=service.service,
+                service=service.confirmed_service,
                 evidence="Unauthenticated SMB negotiation reported SMBv1 support.",
                 remediation="Disable SMBv1 and require a current SMB dialect where compatibility permits.",
                 rule_id=self.check_id,
@@ -136,7 +213,7 @@ class SMBConfigurationCheck(ServiceCheck):
                 host=result.target,
                 port=service.port,
                 protocol=service.protocol,
-                service=service.service,
+                service=service.confirmed_service,
                 evidence="Unauthenticated SMB negotiate response reported signing as supported but not required.",
                 remediation="Require SMB signing where operationally appropriate and restrict SMB exposure.",
                 rule_id=self.check_id,
@@ -147,7 +224,7 @@ class SMBConfigurationCheck(ServiceCheck):
             CheckStatus.COMPLETED,
             service.port,
             service.protocol,
-            service.service,
+            service.confirmed_service,
             (
                 "SMB negotiate completed without authentication. "
                 f"Dialect: {data.dialect or 'unknown'}; "
@@ -161,23 +238,27 @@ class SMBConfigurationCheck(ServiceCheck):
         )
 
 
-class TLSConfigurationCheck(ServiceCheck):
+class TLSConfigurationCheck(ProtocolServiceCheck):
+    protocol_name = "tls"
+    hint_ports = frozenset({443, 8443})
+    hint_names = frozenset({"https", "https-alt", "ssl", "tls"})
+
+    def protocol_demonstrated(self, data) -> bool:
+        return bool(data.tls_version)
+
     check_id = "NS-CHECK-TLS"
     title = "TLS configuration"
 
     def __init__(self, probe: Callable[..., TLSProbeData] = probe_tls) -> None:
         self.probe = probe
 
-    def matches(self, service: PortService) -> bool:
-        return service.protocol == "tcp" and (service.port in {443, 8443} or _service_name(service) in {"https", "ssl", "https-alt"})
-
-    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+    def run(self, result: HostScanResult, service: PortService, *, data=None) -> SecurityCheckResult:
         try:
-            data = self.probe(result.target, port=service.port)
+            data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
             message = str(exc)
             status = CheckStatus.INCONCLUSIVE if "TLS" in message or "tls" in message else CheckStatus.FAILED
-            return SecurityCheckResult(self.check_id, self.title, status, service.port, service.protocol, service.service, message)
+            return SecurityCheckResult(self.check_id, self.title, status, service.port, service.protocol, service.confirmed_service, message)
 
         findings: list[Finding] = []
         if data.expired is True:
@@ -190,7 +271,7 @@ class TLSConfigurationCheck(ServiceCheck):
             CheckStatus.COMPLETED,
             service.port,
             service.protocol,
-            service.service,
+            service.confirmed_service,
             (
                 f"TLS handshake completed: version={data.tls_version or 'unknown'}, "
                 f"cipher={data.cipher or 'unknown'}, subject={data.subject or 'unknown'}, "
@@ -202,50 +283,47 @@ class TLSConfigurationCheck(ServiceCheck):
         )
 
 
-class SSHConfigurationCheck(ServiceCheck):
+class SSHConfigurationCheck(ProtocolServiceCheck):
+    protocol_name = "ssh"
+    hint_ports = frozenset({22})
+    hint_names = frozenset({"ssh"})
+
+    def protocol_demonstrated(self, data) -> bool:
+        return bool(data.banner and re.fullmatch(r"SSH-(?:2\.0|1\.99|1\.5)-[^\s]+(?: [^\r\n]*)?", data.banner))
+
     check_id = "NS-CHECK-SSH"
     title = "SSH configuration"
 
     def __init__(self, probe=probe_ssh) -> None:
         self.probe = probe
 
-    def matches(self, service: PortService) -> bool:
-        return service.protocol == "tcp" and (service.port == 22 or _service_name(service) == "ssh")
-
-    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+    def run(self, result: HostScanResult, service: PortService, *, data=None) -> SecurityCheckResult:
         try:
-            data: SSHProbeData = self.probe(result.target, port=service.port)
+            data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
-            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
-        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.service, f"SSH banner: {data.banner or 'unavailable'}", (), {"banner": data.banner, "protocol": data.protocol, "algorithms": data.algorithms})
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
+        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.confirmed_service, f"SSH banner: {data.banner or 'unavailable'}", (), {"banner": data.banner, "protocol": data.protocol, "algorithms": data.algorithms})
 
 
-class HTTPConfigurationCheck(ServiceCheck):
+class HTTPConfigurationCheck(ProtocolServiceCheck):
+    protocol_name = "http"
+    hint_ports = frozenset({80, 443, 8080, 8443})
+    hint_names = frozenset({"http", "https", "https-alt", "ssl"})
+
+    def protocol_demonstrated(self, data) -> bool:
+        return isinstance(data.status, int) and 100 <= data.status <= 599
+
     check_id = "NS-CHECK-HTTP"
     title = "HTTP security configuration"
 
     def __init__(self, probe=probe_http) -> None:
         self.probe = probe
 
-    def matches(self, service: PortService) -> bool:
-        name = _service_name(service)
-        return service.protocol == "tcp" and (
-            service.port == 80
-            or service.port in {443, 8443}
-            or name in {"http", "http-proxy", "http-alt", "http-api"}
-            or name in {"https", "https-alt", "ssl"}
-            or name.startswith("http-")
-        )
-
-    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+    def run(self, result: HostScanResult, service: PortService, *, data=None) -> SecurityCheckResult:
         try:
-            is_tls = service.port in {443, 8443} or _service_name(service) in {"https", "https-alt", "ssl"}
-            try:
-                data: HTTPProbeData = self.probe(result.target, port=service.port, tls=is_tls)
-            except TypeError:
-                data = self.probe(result.target, port=service.port)
+            data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
-            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
         missing = [header for header in ("x-content-type-options", "content-security-policy", "referrer-policy") if header not in data.headers]
         selected_headers = {
             name: data.headers[name]
@@ -268,7 +346,7 @@ class HTTPConfigurationCheck(ServiceCheck):
             CheckStatus.COMPLETED,
             service.port,
             service.protocol,
-            service.service,
+            service.confirmed_service,
             f"Transport: {'TLS' if data.tls else 'plaintext TCP'}; HTTP response: Valid; status={data.status}; Server={data.server or 'unreported'}",
             (),
             {
@@ -291,25 +369,25 @@ class HTTPConfigurationCheck(ServiceCheck):
         )
 
 
-class DNSConfigurationCheck(ServiceCheck):
+class DNSConfigurationCheck(ProtocolServiceCheck):
+    protocol_name = "dns"
+    hint_ports = frozenset({53})
+    hint_names = frozenset({"dns", "domain"})
+
+    def protocol_demonstrated(self, data) -> bool:
+        return data.responded is True
+
     check_id = "NS-CHECK-DNS"
     title = "DNS configuration"
 
     def __init__(self, probe=probe_dns) -> None:
         self.probe = probe
 
-    def matches(self, service: PortService) -> bool:
-        return service.protocol == "tcp" and (service.port == 53 or _service_name(service) in {"dns", "domain"})
-
-    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+    def run(self, result: HostScanResult, service: PortService, *, data=None) -> SecurityCheckResult:
         try:
-            try:
-                data: DNSProbeData = self.probe(result.target, port=service.port, transport=service.protocol)
-            except TypeError:
-                # Keep compatibility with injected probes written before transport was explicit.
-                data = self.probe(result.target, port=service.port)
+            data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
-            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
         findings = ()
         if data.recursion_available is True:
             findings = (Finding(f"{self.check_id}:RECURSION:{result.target}:{service.port}", "Open DNS recursion confirmed", "The DNS response indicated recursion is available.", Severity.MEDIUM, Confidence.MEDIUM, result.target, "DNS response set the recursion-available flag.", "Restrict recursion to authorized clients and trusted networks.", self.check_id, service.port, service.protocol, service.service),)
@@ -319,7 +397,7 @@ class DNSConfigurationCheck(ServiceCheck):
             CheckStatus.COMPLETED,
             service.port,
             service.protocol,
-            service.service,
+            service.confirmed_service,
             (
                 f"Transport tested: {data.transport}; DNS response: Valid; "
                 f"recursion requested: {'Yes' if data.recursion_requested else 'No'}; "
@@ -338,22 +416,26 @@ class DNSConfigurationCheck(ServiceCheck):
         )
 
 
-class RDPConfigurationCheck(ServiceCheck):
+class RDPConfigurationCheck(ProtocolServiceCheck):
+    protocol_name = "rdp"
+    hint_ports = frozenset({3389})
+    hint_names = frozenset({"rdp", "ms-wbt-server"})
+
+    def protocol_demonstrated(self, data) -> bool:
+        return data.protocol_response is True
+
     check_id = "NS-CHECK-RDP"
     title = "RDP security negotiation"
 
     def __init__(self, probe=probe_rdp) -> None:
         self.probe = probe
 
-    def matches(self, service: PortService) -> bool:
-        return service.protocol == "tcp" and (service.port == 3389 or _service_name(service) in {"rdp", "ms-wbt-server"})
-
-    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+    def run(self, result: HostScanResult, service: PortService, *, data=None) -> SecurityCheckResult:
         try:
-            data: RDPProbeData = self.probe(result.target, port=service.port)
+            data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
-            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
-        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.service, "RDP negotiation response received without authentication.", (), {"protocol_response": data.protocol_response, "security_layer": data.security_layer, "nla": data.nla})
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
+        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.confirmed_service, "RDP negotiation response received without authentication.", (), {"protocol_response": data.protocol_response, "security_layer": data.security_layer, "nla": data.nla})
 
 
 def _tls_finding(result: HostScanResult, service: PortService, title: str, description: str, remediation: str, data: TLSProbeData) -> Finding:
@@ -366,15 +448,11 @@ def _tls_finding(result: HostScanResult, service: PortService, title: str, descr
         host=result.target,
         port=service.port,
         protocol=service.protocol,
-        service=service.service,
+        service=service.confirmed_service,
         evidence=f"TLS handshake succeeded on TCP/{service.port}; certificate validity was evaluated.",
         remediation=remediation,
         rule_id="NS-CHECK-TLS",
     )
-
-
-def _service_name(service: PortService) -> str:
-    return (service.service or "").lower()
 
 
 def _yes_no_unknown(value: bool | None) -> str:
@@ -398,15 +476,11 @@ def _server_fingerprint(server: str | None) -> tuple[str | None, str | None]:
     return ", ".join(product for product, _ in products), ", ".join(version for _, version in products)
 
 
-def _port_or_name(port: int, names: set[str]):
-    return lambda service: service.protocol == "tcp" and (service.port == port or _service_name(service) in names)
-
-
 def default_service_checks() -> tuple[ServiceCheck, ...]:
     return (
+        SSHConfigurationCheck(),
         SMBConfigurationCheck(),
         TLSConfigurationCheck(),
-        SSHConfigurationCheck(),
         HTTPConfigurationCheck(),
         DNSConfigurationCheck(),
         RDPConfigurationCheck(),
@@ -414,18 +488,11 @@ def default_service_checks() -> tuple[ServiceCheck, ...]:
 
 
 def default_check_matcher(check_id: str, service: PortService) -> bool:
-    name = _service_name(service)
-    if check_id == "NS-CHECK-SMB":
-        return service.protocol == "tcp" and (service.port == 445 or name in {"smb", "microsoft-ds"})
-    if check_id == "NS-CHECK-TLS":
-        return service.protocol == "tcp" and (service.port in {443, 8443} or name in {"https", "ssl", "https-alt"})
-    if check_id == "NS-CHECK-HTTP":
-        return service.protocol == "tcp" and (service.port == 80 or name == "http")
-    if check_id == "NS-CHECK-DNS":
-        return service.protocol == "tcp" and (service.port == 53 or name in {"dns", "domain"})
-    return True
+    return any(check.check_id == check_id and check.matches(service) for check in default_service_checks())
 
 
 def dispatch_service_check(checks: Iterable[ServiceCheck], result: HostScanResult, service: PortService) -> tuple[ServiceCheck, ...]:
     """Return every applicable check so layered protocols can be assessed together."""
+    if service.state != "open" or not service.confirmed_protocols:
+        return ()
     return tuple(check for check in checks if check.matches(service))

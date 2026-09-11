@@ -65,6 +65,17 @@ class AttackSurfaceObservation:
     identification_source: str | None = None
     transport: str = "tcp"
     tls: bool | None = None
+    state: str = "unknown"
+    state_reason: str = ""
+    scan_observed: bool = True
+    scanner_state: str | None = None
+    scanner_reason: str | None = None
+    scanner_source: str | None = None
+    scanner_service: dict | None = None
+    service_hint: str | None = None
+    identification_status: str = "UNKNOWN"
+    identities: tuple[dict, ...] = ()
+    identification_attempts: tuple[dict, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +90,17 @@ class AttackSurfaceObservation:
             "identification_source": self.identification_source,
             "transport": self.transport,
             "tls": self.tls,
+            "state": self.state,
+            "state_reason": self.state_reason,
+            "scan_observed": self.scan_observed,
+            "scanner_state": self.scanner_state,
+            "scanner_reason": self.scanner_reason,
+            "scanner_source": self.scanner_source,
+            "scanner_service": self.scanner_service,
+            "service_hint": self.service_hint,
+            "identification_status": self.identification_status,
+            "identities": list(self.identities),
+            "identification_attempts": list(self.identification_attempts),
         }
 
 
@@ -149,14 +171,31 @@ class SecurityCheckResult:
 
 @dataclass(frozen=True, slots=True)
 class AssessmentCoverage:
+    """Endpoint and check counts; services_discovered is a deprecated open_ports alias.
+
+    Retain the legacy constructor field for existing Python callers.
+    """
+
     services_discovered: int
     checks_attempted: int
     checks_completed: int
     checks_unavailable_or_failed: int
+    confirmed_services: int = 0
+
+    @property
+    def open_ports(self) -> int:
+        return self.services_discovered
+
+    @property
+    def unconfirmed_open_ports(self) -> int:
+        return self.open_ports - self.confirmed_services
 
     def to_dict(self) -> dict[str, int]:
         return {
-            "services_discovered": self.services_discovered,
+            "services_discovered": self.open_ports,
+            "open_ports": self.open_ports,
+            "confirmed_services": self.confirmed_services,
+            "unconfirmed_open_ports": self.unconfirmed_open_ports,
             "checks_attempted": self.checks_attempted,
             "checks_completed": self.checks_completed,
             "checks_unavailable_or_failed": self.checks_unavailable_or_failed,
@@ -177,6 +216,8 @@ class HostAssessment:
     probe_status: str = "unknown"
     unimplemented_services: int = 0
     potential_correlations: tuple[dict[str, Any], ...] = ()
+    raw_xml: str | None = None
+    port_summary: tuple[dict, ...] = ()
 
     @property
     def risk_score(self) -> int | None:
@@ -196,13 +237,50 @@ class HostAssessment:
         return self.risk_severity
 
     @property
+    def observed_risk_level(self) -> RiskLevel:
+        """Severity of accepted findings, scoped to assessed evidence only."""
+        if self.findings:
+            highest = max(self.findings, key=lambda finding: finding.score)
+            return RiskLevel(highest.severity.value)
+        if any(check.status is CheckStatus.COMPLETED for check in self.checks):
+            return RiskLevel.INFO
+        return RiskLevel.UNKNOWN
+
+    @property
+    def observed_risk_score(self) -> int | None:
+        if self.observed_risk_level is RiskLevel.UNKNOWN:
+            return None
+        return max((finding.score for finding in self.findings), default=0)
+
+    @property
+    def observed_risk(self) -> dict[str, Any]:
+        return {
+            "severity": self.observed_risk_level.value,
+            "score": self.observed_risk_score,
+            "scope": "assessed_evidence",
+        }
+
+    @property
     def coverage(self) -> AssessmentCoverage:
         completed = sum(check.status is CheckStatus.COMPLETED for check in self.checks)
         unavailable = sum(
             check.status in {CheckStatus.UNAVAILABLE, CheckStatus.FAILED, CheckStatus.INCONCLUSIVE}
             for check in self.checks
         )
-        return AssessmentCoverage(len(self.observations), len(self.checks), completed, unavailable)
+        open_endpoints = {
+            (item.host, item.protocol, item.port)
+            for item in self.observations if item.state == "open"
+        }
+        confirmed_endpoints = {
+            (item.host, item.protocol, item.port)
+            for item in self.observations
+            if item.state == "open" and item.identification_status == "CONFIRMED" and item.service
+        }
+        return AssessmentCoverage(
+            services_discovered=len(open_endpoints), checks_attempted=len(self.checks),
+            checks_completed=completed, checks_unavailable_or_failed=unavailable,
+            confirmed_services=len(confirmed_endpoints),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -214,12 +292,14 @@ class HostAssessment:
             "requested_ports": list(self.requested_ports),
             "reachability": self.reachability,
             "probe_status": self.probe_status,
+            "scan_evidence": {"raw_xml": self.raw_xml, "port_summary": list(self.port_summary)},
             "unimplemented_services": self.unimplemented_services,
             "potential_vulnerability_correlations": list(self.potential_correlations),
             "risk": {
                 "severity": self.risk_level.value,
                 "score": self.risk_score,
             },
+            "observed_risk": self.observed_risk,
             "attack_surface": [observation.to_dict() for observation in self.observations],
             "security_checks": [check.to_dict() for check in self.checks],
             "coverage": self.coverage.to_dict(),

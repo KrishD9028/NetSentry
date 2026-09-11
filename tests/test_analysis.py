@@ -20,11 +20,14 @@ from netsentry.analysis.checks import SMBConfigurationCheck, ServiceCheck, TLSCo
 from netsentry.analysis.models import CheckStatus, SecurityCheckResult
 from netsentry.analysis.probes import ProbeError, SMBProbeData, TLSProbeData, _decode_peer_certificate, probe_smb
 from netsentry.main import _print_assessment
-from netsentry.scanning.models import HostScanResult, PortService
+from netsentry.scanning.models import HostScanResult, PortService, ServiceIdentity, service_protocols
 
 
 def service(port: int, name: str | None, protocol: str = "tcp") -> PortService:
-    return PortService(port=port, protocol=protocol, state="open", service=name)
+    return PortService(
+        port=port, protocol=protocol, state="open", service=name,
+        identities=tuple(ServiceIdentity(item, "fixture protocol evidence", {"service": name}) for item in service_protocols(name)),
+    )
 
 
 def finding_factory(severity: Severity):
@@ -58,6 +61,12 @@ class FailingCheck(ServiceCheck):
 
 
 class SecurityRuleTests(unittest.TestCase):
+    def setUp(self):
+        # Unit tests never connect to the illustrative host addresses.
+        probe = patch("netsentry.analysis.checks.ProtocolServiceCheck.collect", side_effect=ProbeError("fixture unavailable"))
+        probe.start()
+        self.addCleanup(probe.stop)
+
     def test_empty_common_scan_is_limited_not_clean(self) -> None:
         assessment = assess_scan_result(
             HostScanResult(
@@ -70,13 +79,13 @@ class SecurityRuleTests(unittest.TestCase):
         self.assertIsNone(assessment.risk_score)
         self.assertIn("common scan profile", assessment.status_reason)
 
-    def test_empty_full_scan_can_complete_with_zero_risk(self) -> None:
+    def test_empty_full_scan_without_evidence_is_limited(self) -> None:
         assessment = assess_scan_result(
             HostScanResult(target="192.168.1.20", scan_profile="full", requested_ports=tuple(range(1, 65536)))
         )
-        self.assertEqual(assessment.status, AssessmentStatus.COMPLETE)
-        self.assertEqual(assessment.risk_score, 0)
-        self.assertEqual(assessment.risk_level, RiskLevel.INFO)
+        self.assertEqual(assessment.status, AssessmentStatus.LIMITED)
+        self.assertIsNone(assessment.risk_score)
+        self.assertEqual(assessment.risk_level, RiskLevel.UNKNOWN)
 
     def test_telnet_rule_has_high_confidence_and_score(self) -> None:
         assessment = assess_scan_result(

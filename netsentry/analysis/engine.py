@@ -1,7 +1,8 @@
 from collections.abc import Iterable, Sequence
+from dataclasses import asdict, replace
 
 from ..scanning.models import HostScanResult
-from .checks import ServiceCheck, default_service_checks, dispatch_service_check
+from .checks import ServiceCheck, default_service_checks, dispatch_service_check, identify_for_checks
 from .correlation import VulnerabilityProvider
 from .fingerprinting import identify_service
 from .models import (
@@ -30,42 +31,49 @@ class SecurityAnalyzer:
         self.vulnerability_provider = vulnerability_provider
 
     def assess(self, result: HostScanResult) -> HostAssessment:
-        observations = tuple(
-            AttackSurfaceObservation(
-                host=result.target,
-                port=service.port,
-                protocol=service.protocol,
-                service=service.service,
-                product=service.product,
-                version=service.version,
-                evidence=(
-                    f"{service.port}/{service.protocol} reported {service.state} by Nmap"
-                    f"; service identified as {service.service}."
-                    if service.service
-                    else f"{service.port}/{service.protocol} reported {service.state} by Nmap; service was not identified."
-                ),
-                identification_confidence=(identify_service(service).confidence if identify_service(service) else Confidence.LOW),
-                identification_source=(identify_service(service).source if identify_service(service) else "port/service observation"),
-                transport=service.protocol,
-                tls=(service.port in {443, 8443} or (service.service or "").lower() in {"https", "https-alt", "ssl"}) if service.protocol == "tcp" else None,
-            )
-            for service in result.services
-        )
+        observations = []
+        prepared_services = []
         checks: list[SecurityCheckResult] = []
         findings: list[Finding] = []
         unimplemented_services = 0
         correlations: list[dict] = []
-        for service in result.services:
+        for original_service in result.services:
+            service, collected = identify_for_checks(self.checks, result, original_service)
+            prepared_services.append(service)
             evidence = identify_service(service)
+            observations.append(AttackSurfaceObservation(
+                host=result.target, port=service.port, protocol=service.protocol,
+                state=service.state, state_reason=service.state_reason,
+                scan_observed=service.scan_observed, scanner_state=service.scanner_state,
+                scanner_reason=service.scanner_reason, scanner_source=service.scanner_source,
+                service=service.confirmed_service, service_hint=service.service_hint,
+                scanner_service={"name": service.service, "product": service.product,
+                                 "version": service.version, "extra": service.extra,
+                                 "method": service.service_method, "confidence": service.service_confidence,
+                                 "tunnel": service.service_tunnel},
+                product=evidence.product if evidence else None,
+                version=evidence.version if evidence else None,
+                evidence=service.state_reason or f"{service.port}/{service.protocol} reported {service.state}.",
+                identification_status=service.identification_status,
+                identification_confidence=Confidence.HIGH if service.confirmed_protocols else Confidence.LOW,
+                identification_source=", ".join(dict.fromkeys(item.source for item in service.identities)) or None,
+                identities=tuple(asdict(item) for item in service.identities),
+                identification_attempts=service.identification_attempts,
+                transport=service.protocol, tls=True if "tls" in service.confirmed_protocols else None,
+            ))
             if evidence is not None and self.vulnerability_provider is not None:
                 correlations.extend(item.to_dict() for item in self.vulnerability_provider.correlate(evidence))
             applicable_checks = dispatch_service_check(self.checks, result, service)
             if not applicable_checks:
-                unimplemented_services += 1
+                if service.state == "open" and service.confirmed_protocols:
+                    unimplemented_services += 1
                 continue
             for check in applicable_checks:
                 try:
-                    check_result = check.run(result, service)
+                    if check in collected:
+                        check_result = check.run(result, service, data=collected[check])
+                    else:
+                        check_result = check.run(result, service)
                 except Exception as exc:
                     check_result = SecurityCheckResult(
                         check_id=check.check_id,
@@ -78,8 +86,10 @@ class SecurityAnalyzer:
                     )
                 checks.append(check_result)
                 findings.extend(check_result.findings)
+        # Legacy injected rules receive only reachable, identified services.
+        rule_result = replace(result, services=[item for item in prepared_services if item.confirmed_protocols])
         for rule in self.rules:
-            findings.extend(rule.evaluate(result))
+            findings.extend(rule.evaluate(rule_result))
         findings.sort(key=lambda finding: (-finding.score, finding.rule_id, finding.port or 0))
         if result.reachability is False:
             status = AssessmentStatus.UNREACHABLE
@@ -87,7 +97,24 @@ class SecurityAnalyzer:
         elif any(check.status in {CheckStatus.UNAVAILABLE, CheckStatus.FAILED, CheckStatus.INCONCLUSIVE} for check in checks):
             status = AssessmentStatus.LIMITED
             reason = "One or more service-specific security checks were unavailable or failed."
-        elif not result.services and result.scan_profile != "full":
+        elif result.probe_status != "completed" or any(item.state in {"unknown", "filtered"} for item in prepared_services):
+            status = AssessmentStatus.LIMITED
+            reason = "Port-state evidence is incomplete or traffic filtering prevents assessment."
+        elif any(
+            item.confirmed_protocols == ("tls",)
+            and any(attempt["protocol"] == "http" and attempt["status"] == "INCONCLUSIVE" for attempt in item.identification_attempts)
+            for item in prepared_services
+        ):
+            status = AssessmentStatus.LIMITED
+            reason = "TLS was demonstrated, but HTTP identification was inconclusive."
+        elif any(item.state == "open" and not item.confirmed_protocols for item in prepared_services):
+            status = AssessmentStatus.LIMITED
+            reason = "One or more open ports lack confirmed service identity."
+        elif not result.open_ports and not (
+            result.scan_profile == "full"
+            and set(result.requested_ports) == set(range(1, 65536))
+            and {item.port for item in prepared_services if item.protocol == "tcp" and item.state == "closed"} == set(result.requested_ports)
+        ):
             status = AssessmentStatus.LIMITED
             profile = result.scan_profile or "selected"
             reason = f"No open TCP ports were detected within the ports covered by the {profile} scan profile."
@@ -96,7 +123,7 @@ class SecurityAnalyzer:
             reason = "All applicable security checks completed for the observed scan evidence."
         return HostAssessment(
             host=result.target,
-            observations=observations,
+            observations=tuple(observations),
             checks=tuple(checks),
             findings=tuple(findings),
             status=status,
@@ -107,6 +134,8 @@ class SecurityAnalyzer:
             probe_status=result.probe_status,
             unimplemented_services=unimplemented_services,
             potential_correlations=tuple(correlations),
+            raw_xml=result.raw_xml,
+            port_summary=result.port_summary,
         )
 
 

@@ -75,34 +75,57 @@ def _print_discovery_results(devices: list) -> None:
     print(f"\n{len(devices)} device{'s' if len(devices) != 1 else ''} discovered.")
 
 
+def _port_ranges(ports) -> str:
+    ranges = []
+    start = previous = None
+    for port in sorted(set(ports)):
+        if previous is not None and port != previous + 1:
+            ranges.append(str(start) if start == previous else f"{start}-{previous}")
+            start = None
+        if start is None:
+            start = port
+        previous = port
+    if start is not None:
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
+
+
+def _print_port_table(items) -> None:
+    print(f"{'PORT':<11} {'STATE':<9} SERVICE")
+    grouped = {}
+    for item in items:
+        # Keep hints and open services visible; compact large unlabelled ranges.
+        if len(items) > 64 and item.state != "open" and not item.service_hint:
+            grouped.setdefault((item.protocol, item.state), []).append(item.port)
+            continue
+        confirmed = item.confirmed_service if hasattr(item, "confirmed_service") else item.service
+        label = confirmed or "unknown"
+        if not confirmed and item.service_hint:
+            label += f" (hint: {item.service_hint})"
+        if confirmed and item.product:
+            label += f" {item.product}" + (f" {item.version}" if item.version else "")
+        print(f"{str(item.port) + '/' + item.protocol:<11} {item.state:<9} {label}")
+    for (protocol, state), ports in grouped.items():
+        ranges = _port_ranges(ports)
+        if len(ranges) > 100:
+            ranges = ranges[:97] + "..."
+        print(f"{len(ports)} additional {protocol} ports: {state} ({ranges})")
+
+
 def _print_scan_result(result) -> None:
     print(f"{result.target_label}: {result.target}")
     if result.hostname:
         print(f"Hostname: {result.hostname}")
     print()
-
-    if not result.services:
-        if result.scan_profile == "full":
-            print("No open TCP ports were detected across the full TCP range.")
-        else:
-            profile = result.scan_profile or "selected"
-            print(f"No open TCP ports were detected within the ports covered by the {profile} scan profile.")
-        print()
-        print("Scan summary:")
-        print(f"Hosts scanned: 1")
-        print(f"Open ports: 0")
-        return
-
-    print(f"{'PORT':<8} {'STATE':<6} {'SERVICE':<12} PRODUCT")
-    for service in result.services:
-        product_text = service.product or ""
-        if service.version:
-            product_text = f"{product_text} {service.version}".strip()
-        print(f"{service.port}/{service.protocol:<4} {service.state:<6} {service.service or 'unknown':<12} {product_text or '-'}")
-
+    if result.services:
+        _print_port_table(result.services)
+    if not result.open_ports:
+        print(f"No open TCP ports were detected within the ports covered by the {result.scan_profile or 'selected'} scan profile.")
+    if result.probe_status != "completed":
+        print(f"Scan status: {result.probe_status}; port testing may be incomplete.")
     print()
     print("Scan summary:")
-    print(f"Hosts scanned: 1")
+    print("Hosts scanned: 1")
     print(f"Open ports: {result.open_ports}")
 
 
@@ -113,18 +136,26 @@ def _print_assessment(assessment) -> None:
     print(f"Host: {ip_visibility(assessment.host)}: {assessment.host}")
     print(f"Assessment Status: {assessment.status.value}")
     print(f"Status Reason: {assessment.status_reason}")
-    print(f"Risk: {assessment.risk_level.value}")
+    qualifier = " (limited coverage)" if assessment.status.value == "LIMITED" else ""
+    print(f"Overall Risk: {assessment.risk_level.value}{qualifier}")
     score = f"{assessment.risk_score}/10" if assessment.risk_score is not None else "UNKNOWN"
-    print(f"Risk Score: {score}")
+    print(f"Overall Risk Score: {score}")
+    print(f"Observed Risk: {assessment.observed_risk_level.value}")
+    observed_score = f"{assessment.observed_risk_score}/10" if assessment.observed_risk_score is not None else "UNKNOWN"
+    print(f"Observed Risk Score: {observed_score} (assessed evidence only)")
+    if not assessment.findings:
+        if assessment.coverage.checks_completed:
+            print(f"No findings were identified by the {assessment.coverage.checks_completed} completed security checks.")
+        else:
+            print("No security checks completed; observed risk cannot be determined.")
+    if assessment.status.value != "COMPLETE":
+        print("Incomplete assessment prevents a complete target-risk determination.")
     print()
     print("Attack Surface")
-    for observation in assessment.observations:
-        service = observation.service or "unknown"
-        product = f" {observation.product}" if observation.product else ""
-        version = f" {observation.version}" if observation.version else ""
-        print(f"{observation.port}/{observation.protocol:<4} {service}{product}{version}")
-    if not assessment.observations:
-        print("No open TCP services were detected within scan coverage.")
+    if assessment.observations:
+        _print_port_table(assessment.observations)
+    else:
+        print("No port-state evidence was returned within scan coverage.")
     print()
     print("Security Checks")
     if not assessment.checks:
@@ -167,10 +198,12 @@ def _print_assessment(assessment) -> None:
     print()
     print("Assessment Coverage")
     coverage = assessment.coverage
-    print(f"Services discovered: {coverage.services_discovered}")
+    print(f"Open ports: {coverage.open_ports}")
+    print(f"Confirmed services: {coverage.confirmed_services}")
+    print(f"Open ports without confirmed service identity: {coverage.unconfirmed_open_ports}")
     print(f"Security checks attempted: {coverage.checks_attempted}")
     print(f"Checks completed: {coverage.checks_completed}")
-    print(f"Checks unavailable/failed: {coverage.checks_unavailable_or_failed}")
+    print(f"Checks unavailable/failed/inconclusive: {coverage.checks_unavailable_or_failed}")
     if assessment.unimplemented_services:
         print(f"{assessment.unimplemented_services} observed services currently have no registered assessment module.")
     print()
@@ -214,25 +247,28 @@ def _print_network_assessment_summary(assessments: list) -> None:
     print()
     print(f"Hosts assessed: {len(assessments)}")
     print(f"Total findings: {sum(counts.values())}")
-    for severity in (Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO):
+    for severity in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO):
         print(f"{severity.value}: {counts.get(severity, 0)}")
     print()
-    print("Highest-risk hosts:")
+    print("Highest observed-risk hosts (assessed evidence only):")
     ranked_assessments = sorted(
         assessments,
-        key=lambda item: (item.risk_score is None, -(item.risk_score or 0), item.host),
+        key=lambda item: (item.observed_risk_score is None, -(item.observed_risk_score or 0), item.host),
     )
     for index, assessment in enumerate(ranked_assessments[:5], start=1):
         host_display = f"{ip_visibility(assessment.host)}: {assessment.host}"
         score = f"{assessment.risk_score}/10" if assessment.risk_score is not None else "UNKNOWN"
-        print(f"{index}. {host_display:<28} {assessment.risk_level.value:<8} {score}")
+        observed_score = f"{assessment.observed_risk_score}/10" if assessment.observed_risk_score is not None else "UNKNOWN"
+        overall = "UNKNOWN" if assessment.risk_score is None else f"{assessment.risk_level.value} {score}"
+        print(f"{index}. {host_display}  Observed: {assessment.observed_risk_level.value} {observed_score}; "
+              f"Assessment: {assessment.status.value}; Overall: {overall}")
 
 
 def _network_assessment_payload(assessments: list) -> dict:
     counts = Counter(finding.severity.value for assessment in assessments for finding in assessment.findings)
     ranked_assessments = sorted(
         assessments,
-        key=lambda item: (item.risk_score is None, -(item.risk_score or 0), item.host),
+        key=lambda item: (item.observed_risk_score is None, -(item.observed_risk_score or 0), item.host),
     )
     return {
         "assessments": [assessment.to_dict() for assessment in assessments],
@@ -246,6 +282,9 @@ def _network_assessment_payload(assessments: list) -> dict:
                     "host_label": ip_visibility(assessment.host),
                     "severity": assessment.risk_severity.value,
                     "score": assessment.risk_score,
+                    "observed_risk": assessment.observed_risk,
+                    "assessment_status": assessment.status.value,
+                    "coverage": assessment.coverage.to_dict(),
                 }
                 for assessment in ranked_assessments[:5]
             ],

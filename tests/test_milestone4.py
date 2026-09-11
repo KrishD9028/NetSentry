@@ -6,11 +6,15 @@ from netsentry.analysis.engine import assess_scan_result
 from netsentry.analysis.fingerprinting import identify_service, merge_fingerprints
 from netsentry.analysis.models import AssessmentStatus, CheckStatus, Confidence, Severity
 from netsentry.analysis.service_probes import DNSProbeData, HTTPProbeData, RDPProbeData, SSHProbeData, ProbeError, probe_dns
-from netsentry.scanning.models import HostScanResult, PortService
+from netsentry.scanning.models import HostScanResult, PortService, ServiceIdentity, service_protocols
 
 
 def svc(port, name, protocol="tcp"):
-    return PortService(port=port, protocol=protocol, state="open", service=name, product="ExampleServer", version="1.2.3")
+    return PortService(
+        port=port, protocol=protocol, state="open", service=name, product="ExampleServer", version="1.2.3",
+        service_method="probed", service_confidence="10",
+        identities=tuple(ServiceIdentity(item, "Nmap service probe", {"name": name}) for item in service_protocols(name)),
+    )
 
 
 class ServiceModuleTests(unittest.TestCase):
@@ -193,6 +197,8 @@ class FingerprintAndCorrelationTests(unittest.TestCase):
         self.assertEqual(assessment.status, AssessmentStatus.COMPLETE)
         self.assertEqual(assessment.risk_score, 0)
         self.assertEqual(assessment.potential_correlations[0]["status"], "POTENTIAL")
+        self.assertIsNone(assessment.observed_risk_score)
+        self.assertEqual(assessment.observed_risk_level.value, "UNKNOWN")
 
 
 if __name__ == "__main__":

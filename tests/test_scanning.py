@@ -53,7 +53,8 @@ class NmapCommandAndParsingTests(unittest.TestCase):
         result = parse_nmap_xml(xml)
         self.assertEqual(result.target, "192.168.1.10")
         self.assertEqual(result.hostname, "host.local")
-        self.assertEqual(result.services, [])
+        self.assertEqual(result.open_ports, 0)
+        self.assertEqual(result.services[0].state, "closed")
 
     def test_parse_nmap_xml_handles_multiple_services(self) -> None:
         xml = '''
@@ -76,7 +77,11 @@ class NmapCommandAndParsingTests(unittest.TestCase):
         '''
         result = parse_nmap_xml(xml)
         self.assertEqual(len(result.services), 2)
-        self.assertEqual(result.services[0], PortService(port=22, protocol="tcp", state="open", service="ssh", product="OpenSSH", version="9.6", extra="protocol 2.0"))
+        self.assertEqual(result.services[0].port, 22)
+        self.assertEqual(result.services[0].product, "OpenSSH")
+        self.assertEqual(result.services[0].version, "9.6")
+        self.assertEqual(result.services[0].extra, "protocol 2.0")
+        self.assertEqual(result.services[0].identification_status, "HINT")
         self.assertEqual(result.services[1].service, "http")
 
     def test_parse_nmap_xml_handles_missing_version_and_product(self) -> None:
@@ -112,9 +117,12 @@ class NmapCommandAndParsingTests(unittest.TestCase):
 
     @patch("netsentry.scanning.nmap.shutil.which", return_value="/usr/local/bin/nmap")
     @patch("netsentry.scanning.nmap.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["nmap"], timeout=5.0))
-    def test_nmap_timeout_raises_scan_error(self, _mock_run, _mock_which) -> None:
-        with self.assertRaises(NmapScanError):
-            NmapClient().scan("127.0.0.1", [80], timeout=5.0)
+    def test_nmap_timeout_preserves_unknown_ports(self, _mock_run, _mock_which) -> None:
+        result = NmapClient().scan("127.0.0.1", [80], timeout=5.0)
+        self.assertEqual(result.probe_status, "timeout")
+        self.assertEqual(result.services[0].state, "unknown")
+        self.assertFalse(result.services[0].scan_observed)
+        self.assertIsNone(result.reachability)
 
 
 class ProfileResolutionTests(unittest.TestCase):

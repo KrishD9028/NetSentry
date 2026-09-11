@@ -83,7 +83,7 @@ netsentry assess 192.168.1.20 --profile common --json
 netsentry assess --discovered --limit 10 --profile common --json
 ```
 
-Assessment JSON preserves the host classification, scan profile, requested ports, reachability, probe status, attack-surface observations, security-check results, coverage, findings, and risk.
+Assessment JSON preserves the host classification, scan profile, requested ports, reachability, probe status, port-state and service-identity evidence, security-check results, coverage, findings, and risk. Original XML and grouped port summaries are retained in `scan_evidence`.
 
 ## Assessment states
 
@@ -92,18 +92,18 @@ Assessment JSON preserves the host classification, scan profile, requested ports
 - `UNREACHABLE`: the target could not be reached.
 - `ERROR`: reserved for assessment errors that prevent meaningful analysis.
 
-`Risk: UNKNOWN` is used for limited assessments. A clean `0/10` result is reserved for a completed assessment with sufficient coverage and no confirmed findings.
+`Overall Risk: UNKNOWN` is used for limited assessments. The legacy overall `0/10` result is reserved for completed assessments with no findings. Observed risk is reported separately and is scoped to assessed evidence; see below.
 
 ## Analysis architecture
 
 The pipeline is:
 
 ```text
-Discovery -> Nmap enumeration -> scan evidence -> attack-surface observations
-          -> service-aware defensive checks -> confirmed findings -> risk
+Discovery -> Nmap enumeration -> port-state evidence -> bounded protocol identification
+          -> attack-surface observations -> service-aware defensive checks -> findings -> risk
 ```
 
-The analysis package uses stable, independently testable checks. Current default checks identify applicable SMB, TLS, HTTP, and DNS checks, but report them as unavailable when no safe protocol-specific probe is configured. This preserves uncertainty instead of turning service exposure into an unsupported vulnerability claim.
+The analysis package uses independently testable checks for SMB, TLS, SSH, HTTP, DNS, and RDP. Bounded protocol identification precedes security-check dispatch. Successful identification data is reused by the corresponding check; failed identification remains explicit evidence without becoming a vulnerability.
 
 Future service/version normalization, CPE matching, CVE intelligence, and CVSS data can feed the same structured finding model without coupling those concerns to the scanner.
 
@@ -143,3 +143,127 @@ The assessment layer also includes safe, modular checks for:
 Services without a registered module remain attack-surface observations. Their presence alone does not create a vulnerability finding or increase risk.
 
 Software evidence can be passed to provider-based potential vulnerability correlation. Correlations are reported as `POTENTIAL` and never promoted to confirmed findings or risk without direct evidence.
+
+## TCP state and service evidence
+
+TCP scanning still uses Nmap `-sT -Pn` with the existing profile ports, timing,
+process timeout, and host timeout. This change does not enable `-sV` or NSE scripts.
+
+- `open`: Nmap reports the port open.
+- `closed`: Nmap reports the port closed.
+- `filtered`: Nmap reports filtering with an explicit `admin-prohibited`,
+  `host-prohibited`, or `net-prohibited` reason.
+- `unknown`: missing evidence, ambiguous states, no response, or insufficient
+  evidence to distinguish filtering from other causes.
+
+For example, raw Nmap `filtered` with `reason="no-response"` becomes NetSentry
+`unknown`. The original `scanner_state`, `scanner_reason`, and `scanner_source`
+remain available alongside the normalized `state` and `state_reason`. See Nmap's
+[port-state semantics](https://nmap.org/book/port-scanning.html) and
+[XML service-identification metadata](https://nmap.org/book/output-formats-xml-output.html).
+
+Grouped Nmap results are assigned to individual ports only when explicit ranges
+or one exact remaining group establish membership. Mixed reasons are never
+arbitrarily assigned to individual ports. Unattributed requested ports have
+`scan_observed: false`: they may not have been tested, and are not described as
+confirmed closed or filtered. A process timeout returns a `timeout` scan result;
+complete available XML is parsed, while incomplete XML is retained without
+inventing per-port evidence. `-Pn`'s `up/user-set` does not establish reachability.
+
+`PortService.service` preserves the scanner's original label for compatibility.
+Use `service_hint`, `confirmed_service`, and `confirmed_protocols` to interpret it:
+
+- `HINT`: a conventional port or scanner table label, such as SSH on TCP/22.
+- `CONFIRMED`: protocol evidence from a successful bounded NetSentry probe, or
+  Nmap `method="probed"` with `conf="10"`. Each protocol identity retains its
+  source, confidence, and evidence. Missing/low-confidence provenance stays a hint.
+- `UNKNOWN`: neither an identified service nor a useful hint is available.
+
+In assessment JSON, `service` is the confirmed service, `service_hint` is separate,
+and `scanner_service` preserves the original label and metadata. A confirmed
+service is not a confirmed vulnerability or verified software authenticity.
+
+Only open ports can undergo identification. Hints select the existing safe
+protocol probes; a passive SSH banner read also recognizes SSH on other open
+ports (one-second budget when SSH is not hinted). This can add up to one second
+per unidentified open port to assessment time. Active protocol identification
+is limited to the registered modules and applicable hints. It is not a universal
+service detector. `scan` itself does not perform these extra identification probes.
+TLS and HTTP are demonstrated independently; TLS alone does not prove HTTPS.
+
+Closed, filtered, and unknown ports never reach service-specific checks. Open
+ports also need confirmed protocol identity. Identification attempts appear
+separately from security checks in JSON. Port state alone creates no finding.
+Uncertain port state or unidentified open services produce `LIMITED`/unknown
+risk; adding closed ports does not inflate service counts. Even a `full` profile
+cannot claim a completed empty assessment without evidence for the full range.
+
+Terminal output includes state and labels hints explicitly. Large unlabelled
+non-open ranges are compacted; JSON retains every port record. The legacy
+`services` list now includes non-open records, and `open_ports` counts only open
+records. Consumers must use state and identity guards rather than list length or
+port number. Assessment JSON may be larger because it preserves raw XML.
+
+Example (illustrative, not a live measurement):
+
+```text
+Attack Surface
+PORT        STATE     SERVICE
+22/tcp      filtered  unknown (hint: ssh)
+135/tcp     unknown   unknown (hint: msrpc)
+445/tcp     open      smb
+8443/tcp    open      https
+```
+
+For the owner's Windows test host, compare:
+
+```sh
+netsentry scan 100.100.201.201 --profile common
+netsentry assess 100.100.201.201 --profile common
+netsentry assess 100.100.201.201 --profile common --json
+```
+
+TCP/22 should remain visible. A no-response result should show `unknown`, preserve
+Nmap's raw `filtered/no-response` evidence in JSON, and cause no SSH security check.
+After connectivity is restored, an SSH identification banner should permit the
+SSH check. SMB on 445 and demonstrated TLS/HTTP on 8443 should continue working.
+
+## Observed risk and coverage
+
+Overall `risk` remains conservative and backward compatible: non-`COMPLETE`
+assessments retain `UNKNOWN` severity and a null score. A separate
+`observed_risk` object has `scope: "assessed_evidence"` and is derived as follows:
+
+- Accepted findings exist: highest finding severity and score.
+- No findings and at least one completed security check: `INFO`, score `0`.
+- No findings and no completed security checks: `UNKNOWN`, score `null`.
+
+Port state, hints, incomplete identification, potential CVE correlations, and
+coverage counts never contribute to observed risk. A limited assessment can
+therefore retain an observed HIGH finding while overall risk remains unknown.
+An observed zero means completed checks generated no findings; it does not mean
+the target is secure. Existing confidence remains attached to evidence/findings.
+`COMPLETE` refers to applicable checks within the assessment scope, not exhaustive
+knowledge of target risk.
+
+Coverage distinguishes `open_ports`, `confirmed_services`, and
+`unconfirmed_open_ports`. These count unique endpoints by host, transport, and
+port. Only open endpoints with confirmed identity count as confirmed services.
+HTTPS on one port counts once even when TLS and HTTP each have a security check.
+Identification attempts remain separate from security-check counts. The existing
+`checks_unavailable_or_failed` field includes inconclusive checks as well.
+
+**Deprecated:** `coverage.services_discovered` and the Python attribute of that
+name remain compatibility aliases for `open_ports`, never for
+`confirmed_services`. The legacy Python constructor remains supported; callers
+that construct coverage directly should supply `confirmed_services` when known
+(the default is zero). New consumers should use the explicit count names.
+
+JSON retains the existing `risk` object and adds `observed_risk`. Network
+`highest_risk_hosts` entries retain their legacy overall `severity` and `score`
+fields and add `observed_risk`, `assessment_status`, and `coverage`. Ranking now
+uses descending observed score, with unassessed/unknown scores last and host as
+the deterministic tie-breaker. Terminal summaries show observed risk, assessment
+status, and overall risk together. This is an ordering change; strict JSON
+consumers must also accommodate the added fields. Unknown ranking position is
+not an assertion of lower actual risk.
