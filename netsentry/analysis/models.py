@@ -61,6 +61,10 @@ class AttackSurfaceObservation:
     product: str | None
     version: str | None
     evidence: str
+    identification_confidence: Confidence = Confidence.LOW
+    identification_source: str | None = None
+    transport: str = "tcp"
+    tls: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +75,10 @@ class AttackSurfaceObservation:
             "product": self.product,
             "version": self.version,
             "evidence": self.evidence,
+            "identification_confidence": self.identification_confidence.value,
+            "identification_source": self.identification_source,
+            "transport": self.transport,
+            "tls": self.tls,
         }
 
 
@@ -168,6 +176,7 @@ class HostAssessment:
     reachability: bool | None = None
     probe_status: str = "unknown"
     unimplemented_services: int = 0
+    potential_correlations: tuple[dict[str, Any], ...] = ()
 
     @property
     def risk_score(self) -> int | None:
@@ -206,6 +215,7 @@ class HostAssessment:
             "reachability": self.reachability,
             "probe_status": self.probe_status,
             "unimplemented_services": self.unimplemented_services,
+            "potential_vulnerability_correlations": list(self.potential_correlations),
             "risk": {
                 "severity": self.risk_level.value,
                 "score": self.risk_score,

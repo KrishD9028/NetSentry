@@ -2,6 +2,8 @@
 
 from .engine import SecurityAnalyzer, assess_scan_result, assess_scan_results
 from .checks import ConfirmedFindingCheck, CompletedNoFindingCheck, ServiceCheck
+from .correlation import CorrelationStatus, SoftwareEvidence, VulnerabilityCorrelation
+from .fingerprinting import identify_service, merge_fingerprints
 from .models import (
     AssessmentCoverage,
     AssessmentStatus,
@@ -17,6 +19,7 @@ from .models import (
 
 __all__ = [
     "Confidence",
+    "CorrelationStatus",
     "AssessmentCoverage",
     "AssessmentStatus",
     "AttackSurfaceObservation",
@@ -29,6 +32,10 @@ __all__ = [
     "SecurityCheckResult",
     "SecurityAnalyzer",
     "ServiceCheck",
+    "SoftwareEvidence",
+    "VulnerabilityCorrelation",
+    "identify_service",
+    "merge_fingerprints",
     "Severity",
     "assess_scan_result",
     "assess_scan_results",

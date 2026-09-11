@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+import re
 
 from ..scanning.models import HostScanResult, PortService
 from .models import CheckStatus, Confidence, Finding, SecurityCheckResult, Severity
 from .probes import ProbeError, SMBProbeData, TLSProbeData, probe_smb, probe_tls
+from .service_probes import DNSProbeData, HTTPProbeData, RDPProbeData, SSHProbeData, probe_dns, probe_http, probe_rdp, probe_ssh
 
 
 class ServiceCheck(ABC):
@@ -200,6 +202,160 @@ class TLSConfigurationCheck(ServiceCheck):
         )
 
 
+class SSHConfigurationCheck(ServiceCheck):
+    check_id = "NS-CHECK-SSH"
+    title = "SSH configuration"
+
+    def __init__(self, probe=probe_ssh) -> None:
+        self.probe = probe
+
+    def matches(self, service: PortService) -> bool:
+        return service.protocol == "tcp" and (service.port == 22 or _service_name(service) == "ssh")
+
+    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+        try:
+            data: SSHProbeData = self.probe(result.target, port=service.port)
+        except ProbeError as exc:
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
+        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.service, f"SSH banner: {data.banner or 'unavailable'}", (), {"banner": data.banner, "protocol": data.protocol, "algorithms": data.algorithms})
+
+
+class HTTPConfigurationCheck(ServiceCheck):
+    check_id = "NS-CHECK-HTTP"
+    title = "HTTP security configuration"
+
+    def __init__(self, probe=probe_http) -> None:
+        self.probe = probe
+
+    def matches(self, service: PortService) -> bool:
+        name = _service_name(service)
+        return service.protocol == "tcp" and (
+            service.port == 80
+            or service.port in {443, 8443}
+            or name in {"http", "http-proxy", "http-alt", "http-api"}
+            or name in {"https", "https-alt", "ssl"}
+            or name.startswith("http-")
+        )
+
+    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+        try:
+            is_tls = service.port in {443, 8443} or _service_name(service) in {"https", "https-alt", "ssl"}
+            try:
+                data: HTTPProbeData = self.probe(result.target, port=service.port, tls=is_tls)
+            except TypeError:
+                data = self.probe(result.target, port=service.port)
+        except ProbeError as exc:
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
+        missing = [header for header in ("x-content-type-options", "content-security-policy", "referrer-policy") if header not in data.headers]
+        selected_headers = {
+            name: data.headers[name]
+            for name in (
+                "server",
+                "location",
+                "content-type",
+                "strict-transport-security",
+                "content-security-policy",
+                "x-content-type-options",
+                "x-frame-options",
+                "referrer-policy",
+            )
+            if name in data.headers
+        }
+        server_product, server_version = _server_fingerprint(data.server)
+        return SecurityCheckResult(
+            self.check_id,
+            self.title,
+            CheckStatus.COMPLETED,
+            service.port,
+            service.protocol,
+            service.service,
+            f"Transport: {'TLS' if data.tls else 'plaintext TCP'}; HTTP response: Valid; status={data.status}; Server={data.server or 'unreported'}",
+            (),
+            {
+                "status": data.status,
+                "transport": data.transport,
+                "tls": data.tls,
+                "headers": data.headers,
+                "selected_headers": selected_headers,
+                "redirect": data.redirect,
+                "server": data.server,
+                "fingerprint": {
+                    "product": server_product,
+                    "version": server_version,
+                    "source": "HTTP Server header",
+                    "confidence": "HIGH" if server_product and server_version else "MEDIUM" if server_product else "LOW",
+                },
+                "methods": data.methods,
+                "missing_security_headers": missing,
+            },
+        )
+
+
+class DNSConfigurationCheck(ServiceCheck):
+    check_id = "NS-CHECK-DNS"
+    title = "DNS configuration"
+
+    def __init__(self, probe=probe_dns) -> None:
+        self.probe = probe
+
+    def matches(self, service: PortService) -> bool:
+        return service.protocol == "tcp" and (service.port == 53 or _service_name(service) in {"dns", "domain"})
+
+    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+        try:
+            try:
+                data: DNSProbeData = self.probe(result.target, port=service.port, transport=service.protocol)
+            except TypeError:
+                # Keep compatibility with injected probes written before transport was explicit.
+                data = self.probe(result.target, port=service.port)
+        except ProbeError as exc:
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
+        findings = ()
+        if data.recursion_available is True:
+            findings = (Finding(f"{self.check_id}:RECURSION:{result.target}:{service.port}", "Open DNS recursion confirmed", "The DNS response indicated recursion is available.", Severity.MEDIUM, Confidence.MEDIUM, result.target, "DNS response set the recursion-available flag.", "Restrict recursion to authorized clients and trusted networks.", self.check_id, service.port, service.protocol, service.service),)
+        return SecurityCheckResult(
+            self.check_id,
+            self.title,
+            CheckStatus.COMPLETED,
+            service.port,
+            service.protocol,
+            service.service,
+            (
+                f"Transport tested: {data.transport}; DNS response: Valid; "
+                f"recursion requested: {'Yes' if data.recursion_requested else 'No'}; "
+                f"recursion available: {_yes_no_unknown(data.recursion_available)}; "
+                f"response code: {data.response_code or 'Unknown'}."
+            ),
+            findings,
+            {
+                "responded": data.responded,
+                "transport": data.transport,
+                "recursion_requested": data.recursion_requested,
+                "recursion_available": data.recursion_available,
+                "authoritative": data.authoritative,
+                "response_code": data.response_code,
+            },
+        )
+
+
+class RDPConfigurationCheck(ServiceCheck):
+    check_id = "NS-CHECK-RDP"
+    title = "RDP security negotiation"
+
+    def __init__(self, probe=probe_rdp) -> None:
+        self.probe = probe
+
+    def matches(self, service: PortService) -> bool:
+        return service.protocol == "tcp" and (service.port == 3389 or _service_name(service) in {"rdp", "ms-wbt-server"})
+
+    def run(self, result: HostScanResult, service: PortService) -> SecurityCheckResult:
+        try:
+            data: RDPProbeData = self.probe(result.target, port=service.port)
+        except ProbeError as exc:
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.service, str(exc))
+        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.service, "RDP negotiation response received without authentication.", (), {"protocol_response": data.protocol_response, "security_layer": data.security_layer, "nla": data.nla})
+
+
 def _tls_finding(result: HostScanResult, service: PortService, title: str, description: str, remediation: str, data: TLSProbeData) -> Finding:
     return Finding(
         finding_id=f"NS-CHECK-TLS:{title}:{result.target}:{service.port}",
@@ -229,17 +385,31 @@ def _yes_no_unknown(value: bool | None) -> str:
     return "Unknown"
 
 
+def _server_fingerprint(server: str | None) -> tuple[str | None, str | None]:
+    if not server:
+        return None, None
+    products = []
+    for token in server.split():
+        match = re.match(r"([^/\s]+)/([^/\s]+)$", token)
+        if match:
+            products.append((match.group(1), match.group(2)))
+    if not products:
+        return server, None
+    return ", ".join(product for product, _ in products), ", ".join(version for _, version in products)
+
+
 def _port_or_name(port: int, names: set[str]):
     return lambda service: service.protocol == "tcp" and (service.port == port or _service_name(service) in names)
 
 
 def default_service_checks() -> tuple[ServiceCheck, ...]:
-    unavailable = "No safe protocol-specific probe is configured; the Nmap observation is preserved without claiming a vulnerability."
     return (
         SMBConfigurationCheck(),
         TLSConfigurationCheck(),
-        UnavailableServiceCheck("NS-CHECK-HTTP", "HTTP security configuration", unavailable, lambda service: default_check_matcher("NS-CHECK-HTTP", service)),
-        UnavailableServiceCheck("NS-CHECK-DNS", "DNS configuration", unavailable, lambda service: default_check_matcher("NS-CHECK-DNS", service)),
+        SSHConfigurationCheck(),
+        HTTPConfigurationCheck(),
+        DNSConfigurationCheck(),
+        RDPConfigurationCheck(),
     )
 
 
@@ -256,8 +426,6 @@ def default_check_matcher(check_id: str, service: PortService) -> bool:
     return True
 
 
-def dispatch_service_check(checks: Iterable[ServiceCheck], result: HostScanResult, service: PortService) -> ServiceCheck | None:
-    for check in checks:
-        if check.matches(service):
-            return check
-    return None
+def dispatch_service_check(checks: Iterable[ServiceCheck], result: HostScanResult, service: PortService) -> tuple[ServiceCheck, ...]:
+    """Return every applicable check so layered protocols can be assessed together."""
+    return tuple(check for check in checks if check.matches(service))

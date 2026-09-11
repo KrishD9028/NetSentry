@@ -129,3 +129,17 @@ python -m unittest discover -s tests -v
 ```
 
 Tests use constructed scan results and mocked discovery/subprocess boundaries. They do not scan random Internet hosts.
+
+## Milestone 4 capabilities
+
+The assessment layer also includes safe, modular checks for:
+
+- SSH banners and protocol evidence
+- HTTP response status, redirects, server metadata, and security-header observations
+- DNS response and recursion flags
+- RDP negotiation response
+- SMB and TLS checks from Milestone 3
+
+Services without a registered module remain attack-surface observations. Their presence alone does not create a vulnerability finding or increase risk.
+
+Software evidence can be passed to provider-based potential vulnerability correlation. Correlations are reported as `POTENTIAL` and never promoted to confirmed findings or risk without direct evidence.
