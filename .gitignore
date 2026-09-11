@@ -1,0 +1,24 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Local environments
+venv/
+
+# Editor
+.vscode/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# NetSentry runtime data
+state/
+data/
+logs/
+reports/

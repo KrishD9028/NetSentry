@@ -1,0 +1,209 @@
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+from ..ip import ip_visibility
+
+
+class Severity(str, Enum):
+    INFO = "INFO"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+    @property
+    def score(self) -> int:
+        return {
+            Severity.INFO: 0,
+            Severity.LOW: 2,
+            Severity.MEDIUM: 5,
+            Severity.HIGH: 8,
+            Severity.CRITICAL: 10,
+        }[self]
+
+
+class Confidence(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class AssessmentStatus(str, Enum):
+    COMPLETE = "COMPLETE"
+    LIMITED = "LIMITED"
+    UNREACHABLE = "UNREACHABLE"
+    ERROR = "ERROR"
+
+
+class CheckStatus(str, Enum):
+    COMPLETED = "COMPLETED"
+    UNAVAILABLE = "UNAVAILABLE"
+    FAILED = "FAILED"
+
+
+class RiskLevel(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    INFO = "INFO"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass(frozen=True, slots=True)
+class AttackSurfaceObservation:
+    host: str
+    port: int
+    protocol: str
+    service: str | None
+    product: str | None
+    version: str | None
+    evidence: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "host": self.host,
+            "port": self.port,
+            "protocol": self.protocol,
+            "service": self.service,
+            "product": self.product,
+            "version": self.version,
+            "evidence": self.evidence,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    finding_id: str
+    title: str
+    description: str
+    severity: Severity
+    confidence: Confidence
+    host: str
+    evidence: str
+    remediation: str
+    rule_id: str
+    port: int | None = None
+    protocol: str | None = None
+    service: str | None = None
+    references: tuple[str, ...] = ()
+
+    @property
+    def score(self) -> int:
+        return self.severity.score
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "finding_id": self.finding_id,
+            "title": self.title,
+            "description": self.description,
+            "severity": self.severity.value,
+            "confidence": self.confidence.value,
+            "host": self.host,
+            "port": self.port,
+            "protocol": self.protocol,
+            "service": self.service,
+            "evidence": self.evidence,
+            "remediation": self.remediation,
+            "references": list(self.references),
+            "rule_id": self.rule_id,
+            "score": self.score,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityCheckResult:
+    check_id: str
+    title: str
+    status: CheckStatus
+    port: int | None = None
+    protocol: str | None = None
+    service: str | None = None
+    reason: str = ""
+    findings: tuple[Finding, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "check_id": self.check_id,
+            "title": self.title,
+            "status": self.status.value,
+            "port": self.port,
+            "protocol": self.protocol,
+            "service": self.service,
+            "reason": self.reason,
+            "findings": [finding.to_dict() for finding in self.findings],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AssessmentCoverage:
+    services_discovered: int
+    checks_attempted: int
+    checks_completed: int
+    checks_unavailable_or_failed: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "services_discovered": self.services_discovered,
+            "checks_attempted": self.checks_attempted,
+            "checks_completed": self.checks_completed,
+            "checks_unavailable_or_failed": self.checks_unavailable_or_failed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HostAssessment:
+    host: str
+    observations: tuple[AttackSurfaceObservation, ...] = ()
+    checks: tuple[SecurityCheckResult, ...] = ()
+    findings: tuple[Finding, ...] = ()
+    status: AssessmentStatus = AssessmentStatus.LIMITED
+    status_reason: str = ""
+    scan_profile: str = "unspecified"
+    requested_ports: tuple[int, ...] = ()
+    reachability: bool | None = None
+    probe_status: str = "unknown"
+
+    @property
+    def risk_score(self) -> int | None:
+        if self.risk_level is RiskLevel.UNKNOWN:
+            return None
+        return max((finding.score for finding in self.findings), default=0)
+
+    @property
+    def risk_severity(self) -> RiskLevel:
+        if self.status is not AssessmentStatus.COMPLETE:
+            return RiskLevel.UNKNOWN
+        highest = max((finding.severity for finding in self.findings), key=lambda severity: severity.score, default=Severity.INFO)
+        return RiskLevel(highest.value)
+
+    @property
+    def risk_level(self) -> RiskLevel:
+        return self.risk_severity
+
+    @property
+    def coverage(self) -> AssessmentCoverage:
+        completed = sum(check.status is CheckStatus.COMPLETED for check in self.checks)
+        unavailable = len(self.checks) - completed
+        return AssessmentCoverage(len(self.observations), len(self.checks), completed, unavailable)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "host": self.host,
+            "host_label": ip_visibility(self.host),
+            "assessment_status": self.status.value,
+            "status_reason": self.status_reason,
+            "scan_profile": self.scan_profile,
+            "requested_ports": list(self.requested_ports),
+            "reachability": self.reachability,
+            "probe_status": self.probe_status,
+            "risk": {
+                "severity": self.risk_level.value,
+                "score": self.risk_score,
+            },
+            "attack_surface": [observation.to_dict() for observation in self.observations],
+            "security_checks": [check.to_dict() for check in self.checks],
+            "coverage": self.coverage.to_dict(),
+            "findings": [finding.to_dict() for finding in self.findings],
+        }
