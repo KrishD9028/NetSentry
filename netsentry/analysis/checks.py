@@ -133,6 +133,8 @@ class ProtocolServiceCheck(ServiceCheck):
             options["transport"] = service.protocol
         elif self.protocol_name == "ssh" and service.port != 22 and service.service_hint != "ssh":
             options["timeout"] = 1.0
+        if self.protocol_name in {"ssh", "rdp"}:
+            options["enumerate_security"] = True
         # Compatibility with injected probes, without retrying after TypeError.
         parameters = inspect.signature(self.probe).parameters
         if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
@@ -154,7 +156,9 @@ def identify_for_checks(checks, result: HostScanResult, service: PortService):
         try:
             data = check.collect(result, service)
             if not check.protocol_demonstrated(data):
-                raise ProbeError("Response did not demonstrate the expected protocol.")
+                attempts.append({"protocol": check.protocol_name, "status": "INCONCLUSIVE",
+                                 "reason": "Response did not demonstrate the expected protocol.", "evidence": asdict(data)})
+                continue
             identity = ServiceIdentity(check.protocol_name, f"NetSentry {check.protocol_name.upper()} probe", asdict(data))
             identities = service.identities + (identity,)
             if check.protocol_name == "http" and data.tls and "tls" not in service.confirmed_protocols:
@@ -302,7 +306,36 @@ class SSHConfigurationCheck(ProtocolServiceCheck):
             data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
             return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
-        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.confirmed_service, f"SSH banner: {data.banner or 'unavailable'}", (), {"banner": data.banner, "protocol": data.protocol, "algorithms": data.algorithms})
+        findings = []
+        policies = (
+            ("kex", "diffie-hellman-group1-sha1", "https://www.rfc-editor.org/rfc/rfc9142.html"),
+            ("kex", "rsa1024-sha1", "https://www.rfc-editor.org/rfc/rfc9142.html"),
+            ("cipher_client_to_server", "arcfour", "https://www.rfc-editor.org/rfc/rfc8758.html"),
+            ("cipher_server_to_client", "arcfour", "https://www.rfc-editor.org/rfc/rfc8758.html"),
+        )
+        policies += tuple((category, algorithm, "https://www.rfc-editor.org/rfc/rfc8758.html")
+                          for category in ("cipher_client_to_server", "cipher_server_to_client")
+                          for algorithm in ("arcfour128", "arcfour256"))
+        if data.enumeration_status == "completed":
+            for category, algorithm, reference in policies:
+                if algorithm not in data.algorithms.get(category, ()):
+                    continue
+                findings.append(Finding(
+                    f"{self.check_id}:{category}:{algorithm}:{result.target}:{service.port}",
+                    f"Obsolete SSH algorithm advertised: {algorithm} ({category})",
+                    "The server advertised an obsolete algorithm; this does not establish that a session used it.",
+                    Severity.MEDIUM, Confidence.HIGH, result.target,
+                    f"Server SSH_MSG_KEXINIT {category} list includes {algorithm}.",
+                    "Remove the obsolete algorithm from the server configuration and repeat enumeration.",
+                    self.check_id, service.port, service.protocol, service.confirmed_service, (reference,),
+                ))
+        complete = data.enumeration_status == "completed" and all(data.algorithms.get(key) for key in (
+            "kex", "host_key", "cipher_client_to_server", "cipher_server_to_client", "mac_client_to_server", "mac_server_to_client"))
+        return SecurityCheckResult(
+            self.check_id, self.title, CheckStatus.COMPLETED if complete else CheckStatus.INCONCLUSIVE,
+            service.port, service.protocol, service.confirmed_service,
+            data.enumeration_reason, tuple(findings), asdict(data),
+        )
 
 
 class HTTPConfigurationCheck(ProtocolServiceCheck):
@@ -435,7 +468,13 @@ class RDPConfigurationCheck(ProtocolServiceCheck):
             data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
             return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
-        return SecurityCheckResult(self.check_id, self.title, CheckStatus.COMPLETED, service.port, service.protocol, service.confirmed_service, "RDP negotiation response received without authentication.", (), {"protocol_response": data.protocol_response, "security_layer": data.security_layer, "nla": data.nla})
+        return SecurityCheckResult(
+            self.check_id, self.title,
+            CheckStatus.COMPLETED if data.enumeration_status == "completed" else CheckStatus.INCONCLUSIVE,
+            service.port, service.protocol, service.confirmed_service,
+            "RDP negotiation evidence collected without authentication; selected protocols describe individual attempts.",
+            (), asdict(data),
+        )
 
 
 def _tls_finding(result: HostScanResult, service: PortService, title: str, description: str, remediation: str, data: TLSProbeData) -> Finding:

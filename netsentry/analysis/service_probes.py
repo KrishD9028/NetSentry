@@ -7,11 +7,7 @@ from typing import Callable
 from .probes import ProbeError
 
 
-@dataclass(frozen=True, slots=True)
-class SSHProbeData:
-    banner: str | None
-    protocol: str | None
-    algorithms: dict[str, tuple[str, ...]]
+from .ssh import SSHProbeData, probe_ssh
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,11 +32,7 @@ class DNSProbeData:
     recursion_requested: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class RDPProbeData:
-    protocol_response: bool
-    security_layer: str | None = None
-    nla: bool | None = None
+from .rdp import RDPProbeData, probe_rdp
 
 
 def _connect(host: str, port: int, timeout: float, socket_factory):
@@ -48,26 +40,6 @@ def _connect(host: str, port: int, timeout: float, socket_factory):
         return socket_factory((host, port), timeout=timeout)
     except (OSError, TimeoutError) as exc:
         raise ProbeError(f"connection failed: {exc}") from exc
-
-
-def probe_ssh(host: str, *, port: int = 22, timeout: float = 3.0, socket_factory=socket.create_connection) -> SSHProbeData:
-    deadline = time.monotonic() + timeout
-    with _connect(host, port, timeout, socket_factory) as connection:
-        received = bytearray()
-        while len(received) < 4096:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ProbeError("SSH identification timed out")
-            connection.settimeout(remaining)
-            chunk = connection.recv(4096 - len(received))
-            if not chunk:
-                break
-            received.extend(chunk)
-            for line in bytes(received).split(b"\n")[:-1]:
-                banner = line.rstrip(b"\r").decode("ascii", errors="replace")
-                if re.fullmatch(r"SSH-(?:2\.0|1\.99|1\.5)-[^\s]+(?: [^\r\n]*)?", banner) and len(line) <= 255:
-                    return SSHProbeData(banner, banner.split("-", 2)[1], {})
-    raise ProbeError("service did not provide a complete SSH identification string")
 
 
 def probe_http(
@@ -197,21 +169,3 @@ def _parse_dns_response(query: bytes, response: bytes, transport: str) -> DNSPro
         response_code=response_code,
         recursion_requested=bool(query[2] & 0x01),
     )
-
-
-def probe_rdp(host: str, *, port: int = 3389, timeout: float = 3.0, socket_factory=socket.create_connection) -> RDPProbeData:
-    request = bytes.fromhex("030000130ee000000000000100080003000000")
-    deadline = time.monotonic() + timeout
-    with _connect(host, port, timeout, socket_factory) as connection:
-        connection.settimeout(timeout)
-        connection.sendall(request)
-        header = _recv_exact(connection, 4, "RDP", deadline)
-        size = int.from_bytes(header[2:4], "big")
-        if header[:2] != b"\x03\x00" or not 11 <= size <= 4096:
-            raise ProbeError("service did not provide a valid RDP TPKT header")
-        response = header + _recv_exact(connection, size - 4, "RDP", deadline)
-    if response[4] != size - 5 or response[5] != 0xD0:
-        raise ProbeError("service did not provide an RDP X.224 connection confirm")
-    if size > 11 and (size != 19 or response[11] not in {2, 3} or response[13:15] != b"\x08\x00"):
-        raise ProbeError("service did not provide a valid RDP negotiation response")
-    return RDPProbeData(True)

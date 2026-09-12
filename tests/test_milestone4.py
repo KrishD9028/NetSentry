@@ -1,7 +1,8 @@
 import unittest
 
 from netsentry.analysis.checks import DNSConfigurationCheck, HTTPConfigurationCheck, RDPConfigurationCheck, SSHConfigurationCheck
-from netsentry.analysis.correlation import CorrelationStatus, StaticVulnerabilityProvider, SoftwareEvidence, VulnerabilityCorrelation
+from netsentry.analysis.correlation import CorrelationStatus, StaticVulnerabilityProvider, SoftwareEvidence, VulnerabilityCorrelation, VulnerabilityDefinition
+from netsentry.analysis.versions import AffectedVersionRange
 from netsentry.analysis.engine import assess_scan_result
 from netsentry.analysis.fingerprinting import identify_service, merge_fingerprints
 from netsentry.analysis.models import AssessmentStatus, CheckStatus, Confidence, Severity
@@ -20,7 +21,7 @@ def svc(port, name, protocol="tcp"):
 class ServiceModuleTests(unittest.TestCase):
     def test_ssh_banner_is_preserved(self):
         result = SSHConfigurationCheck(lambda host, port: SSHProbeData("SSH-2.0-OpenSSH_9.6", "2.0", {})).run(HostScanResult("10.0.0.1"), svc(22, "ssh"))
-        self.assertEqual(result.status, CheckStatus.COMPLETED)
+        self.assertEqual(result.status, CheckStatus.INCONCLUSIVE)
         self.assertEqual(result.details["banner"], "SSH-2.0-OpenSSH_9.6")
 
     def test_http_headers_are_observations(self):
@@ -174,7 +175,7 @@ class ServiceModuleTests(unittest.TestCase):
 
     def test_rdp_protocol_response_is_not_a_vulnerability(self):
         result = RDPConfigurationCheck(lambda host, port: RDPProbeData(True)).run(HostScanResult("10.0.0.1"), svc(3389, "ms-wbt-server"))
-        self.assertEqual(result.status, CheckStatus.COMPLETED)
+        self.assertEqual(result.status, CheckStatus.INCONCLUSIVE)
         self.assertEqual(result.findings, ())
 
 
@@ -192,7 +193,7 @@ class FingerprintAndCorrelationTests(unittest.TestCase):
 
     def test_potential_correlation_is_not_a_finding_or_risk(self):
         evidence = SoftwareEvidence("ExampleServer", "1.2.3", "tcp", Confidence.HIGH, "Nmap fingerprint")
-        correlation = VulnerabilityCorrelation("CVE-2099-0001", "ExampleServer", "<1.3.0", evidence, CorrelationStatus.POTENTIAL, Confidence.HIGH, Severity.HIGH)
+        correlation = VulnerabilityDefinition("CVE-2099-0001", "ExampleServer", (AffectedVersionRange("numeric", upper="1.3.0"),), "fixture", severity=Severity.HIGH)
         assessment = assess_scan_result(HostScanResult("10.0.0.1", services=[svc(135, "msrpc")], scan_profile="full"), vulnerability_provider=StaticVulnerabilityProvider((correlation,)))
         self.assertEqual(assessment.status, AssessmentStatus.COMPLETE)
         self.assertEqual(assessment.risk_score, 0)

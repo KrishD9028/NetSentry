@@ -3,8 +3,8 @@ from dataclasses import asdict, replace
 
 from ..scanning.models import HostScanResult
 from .checks import ServiceCheck, default_service_checks, dispatch_service_check, identify_for_checks
-from .correlation import VulnerabilityProvider
-from .fingerprinting import identify_service
+from .correlation import VulnerabilityProvider, bind_correlation
+from .fingerprinting import identify_service, collect_software_evidence
 from .models import (
     AssessmentStatus,
     AttackSurfaceObservation,
@@ -37,6 +37,8 @@ class SecurityAnalyzer:
         findings: list[Finding] = []
         unimplemented_services = 0
         correlations: list[dict] = []
+        software_observations = []
+        correlation_diagnostics = []
         for original_service in result.services:
             service, collected = identify_for_checks(self.checks, result, original_service)
             prepared_services.append(service)
@@ -61,13 +63,10 @@ class SecurityAnalyzer:
                 identification_attempts=service.identification_attempts,
                 transport=service.protocol, tls=True if "tls" in service.confirmed_protocols else None,
             ))
-            if evidence is not None and self.vulnerability_provider is not None:
-                correlations.extend(item.to_dict() for item in self.vulnerability_provider.correlate(evidence))
             applicable_checks = dispatch_service_check(self.checks, result, service)
-            if not applicable_checks:
-                if service.state == "open" and service.confirmed_protocols:
-                    unimplemented_services += 1
-                continue
+            if not applicable_checks and service.state == "open" and service.confirmed_protocols:
+                unimplemented_services += 1
+            endpoint_checks = []
             for check in applicable_checks:
                 try:
                     if check in collected:
@@ -85,7 +84,28 @@ class SecurityAnalyzer:
                         reason=f"Safe check failed: {exc}",
                     )
                 checks.append(check_result)
+                endpoint_checks.append(check_result)
                 findings.extend(check_result.findings)
+            endpoint_software = collect_software_evidence(service, endpoint_checks, host=result.target)
+            software_observations.extend({**asdict(item), "confidence": item.confidence.value} for item in endpoint_software)
+            for item in endpoint_software:
+                competing = {other.version for other in endpoint_software if other.product.casefold() == item.product.casefold() and other.version is not None}
+                context = {"host": result.target, "port": service.port, "product": item.product, "version": item.version, "source": item.source}
+                if len(competing) > 1:
+                    correlation_diagnostics.append({**context, "status": "INDETERMINATE", "reason": "Conflicting observed versions; automatic correlation withheld."})
+                    continue
+                if self.vulnerability_provider is not None:
+                    if hasattr(self.vulnerability_provider, "evaluate"):
+                        matches, diagnostics = self.vulnerability_provider.evaluate(item)
+                        correlation_diagnostics.extend({**context, **diagnostic} for diagnostic in diagnostics)
+                    else:
+                        matches = self.vulnerability_provider.correlate(item)
+                    for match in matches:
+                        bound = bind_correlation(match, item)
+                        if bound is not None:
+                            correlations.append(bound.to_dict())
+                        else:
+                            correlation_diagnostics.append({**context, "status": "INDETERMINATE", "reason": "Provider result lacks valid structured applicability."})
         # Legacy injected rules receive only reachable, identified services.
         rule_result = replace(result, services=[item for item in prepared_services if item.confirmed_protocols])
         for rule in self.rules:
@@ -136,6 +156,8 @@ class SecurityAnalyzer:
             potential_correlations=tuple(correlations),
             raw_xml=result.raw_xml,
             port_summary=result.port_summary,
+            software_evidence=tuple(software_observations),
+            correlation_diagnostics=tuple(correlation_diagnostics),
         )
 
 

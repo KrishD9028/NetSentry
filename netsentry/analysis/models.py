@@ -218,6 +218,8 @@ class HostAssessment:
     potential_correlations: tuple[dict[str, Any], ...] = ()
     raw_xml: str | None = None
     port_summary: tuple[dict, ...] = ()
+    software_evidence: tuple[dict, ...] = ()
+    correlation_diagnostics: tuple[dict, ...] = ()
 
     @property
     def risk_score(self) -> int | None:
@@ -295,6 +297,8 @@ class HostAssessment:
             "scan_evidence": {"raw_xml": self.raw_xml, "port_summary": list(self.port_summary)},
             "unimplemented_services": self.unimplemented_services,
             "potential_vulnerability_correlations": list(self.potential_correlations),
+            "software_evidence": list(self.software_evidence),
+            "correlation_diagnostics": list(self.correlation_diagnostics),
             "risk": {
                 "severity": self.risk_level.value,
                 "score": self.risk_score,

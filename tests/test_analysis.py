@@ -190,8 +190,8 @@ class AssessmentSerializationTests(unittest.TestCase):
                 HostScanResult(target="100.100.201.201", services=[service(445, "smb")], scan_profile="full"),
                 checks=[check],
             ))
-        self.assertIn("Negotiated dialect: SMB 3.1.1", output.getvalue())
-        self.assertIn("Signing required: No", output.getvalue())
+        self.assertIn("SMB 3.1.1, signing not required", output.getvalue())
+        self.assertIn("COMPLETED", output.getvalue())
         self.assertEqual(result.findings[0].title, "SMB signing is not required")
 
     def test_smb_signing_required_and_smbv1_disabled_have_no_findings(self) -> None:

@@ -267,3 +267,116 @@ the deterministic tie-breaker. Terminal summaries show observed risk, assessment
 status, and overall risk together. This is an ordering change; strict JSON
 consumers must also accommodate the added fields. Unknown ranking position is
 not an assertion of lower actual risk.
+
+## Milestone 4: SSH algorithms, RDP negotiation, and version ranges
+
+SSH banner identity and security enumeration are independent facts. The SSH
+check exchanges identification and KEXINIT messages only after a valid SSH banner
+has been received. It collects advertised KEX and host-key algorithms, directional
+ciphers/MACs, compression lists, and extension markers without completing key
+exchange or authenticating. Advertised algorithms do not prove a particular
+session used them or reveal host-key size. Banner-only and failed enumeration
+results retain SSH identity but make configuration assessment `INCONCLUSIVE`.
+The direct `probe_ssh` API defaults to banner-only behavior for compatibility;
+checks request `enumerate_security=True` and reuse that collected result.
+
+The intentionally small finding policy covers `diffie-hellman-group1-sha1` and
+`rsa1024-sha1` ([RFC 9142](https://www.rfc-editor.org/rfc/rfc9142.html)), and
+`arcfour`, `arcfour128`, `arcfour256` in either cipher direction
+([RFC 8758](https://www.rfc-editor.org/rfc/rfc8758.html)). Unknown algorithms are
+observations. Duplicate names do not duplicate a finding within a category.
+Other host-key, cipher, and MAC policies remain outside this initial rule set.
+
+RDP retains each requested mask, selected protocol or failure code, flags, raw
+response, interpretation, and optional TLS certificate metadata. It uses at most
+three connections under one deadline: the existing TLS/CredSSP offer, a TLS-only
+attempt when CredSSP was selected, and a legacy attempt only after explicit
+SSL-not-allowed evidence. Selection is specific to an attempt, not an inventory.
+An explicit HYBRID_REQUIRED_BY_SERVER failure supports `nla_required: true`;
+CredSSP selection supports `nla_available: true`. TLS-only acceptance does not
+become an "NLA disabled" finding. Unknown/reset/timeout results leave capability
+fields unknown. Contradictions retain their attempts and produce an inconclusive
+summary. The old `nla` field is deprecated and remains unset. Raw selected values
+outside the implemented set remain visible with an inconclusive interpretation.
+
+TLS metadata is collected on the negotiated RDP connection, with certificate
+verification explicitly disabled for observation. No HTTP request, CredSSP
+message, or desktop session follows. Certificate/handshake failure does not erase
+RDP identity. Nested TLS is recorded inside RDP evidence and does not dispatch
+standalone HTTPS checks. RDP negotiation produces observations in this chunk.
+The [Microsoft negotiation specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/b2975bdc-6d56-49ee-9c57-f2ff3a0b6817)
+defines selections and their scope.
+
+Network exchanges use a single per-probe deadline (existing three-second default;
+one second for the unhinted SSH fallback). SSH is capped at a 4 KiB banner read,
+16 packets, 35,000-byte packet lengths, 64 KiB total received, and bounded algorithm
+lists/names. RDP frames are capped at 4 KiB. A slow response can legitimately
+remain inconclusive rather than trigger unbounded retries.
+
+### Offline affected-version definitions
+
+`StaticVulnerabilityProvider` now accepts `VulnerabilityDefinition` records rather
+than preconstructed correlation results. Each definition supplies product,
+optional vendor/variant, one or more explicit `AffectedVersionRange` records,
+source/reference, and optional severity/CVSS. Use `exact`, or `lower`/`upper` with
+explicit inclusivity flags. Multiple ranges are alternatives. Unbounded,
+malformed, or legacy string ranges produce an `INDETERMINATE` diagnostic, never a
+product-only positive. The supported schemes are intentionally limited:
+
+- `numeric`: dotted nonnegative integers, at most 16 components, each at most
+  16 digits; trailing zero components compare equally. Leading zero components
+  are rejected except for zero itself.
+- `semver`: strict three-component SemVer, prerelease precedence, and ignored
+  build metadata for ordering/equality. No coercion of vendor suffixes.
+- `openssh`: explicit `upstream`, `portable`, or `windows` variant required on
+  the definition and evidence. Portable versions require a `p` suffix; upstream
+  and Windows versions use the two-component upstream version within their own
+  variant. These variants are never automatically equated.
+- `opaque`: explicit exact literal matching only, no range ordering.
+
+Version strings are bounded to 256 printable ASCII characters. Numeric/SemVer
+comparators are not universal distribution/package comparators. Unknown vendor
+information cannot satisfy a vendor-specific definition. OpenSSH banner shape
+provides variant evidence, not a Windows OS build number or patch assurance.
+
+Each positive result binds the current software observation to a matching range
+and is always `POTENTIAL`; provider-boundary checks enforce structured applicability
+and never reuse a stale observation or CONFIRMED status. No correlation contributes
+to observed or overall risk. `affected_range` is retained as a display string;
+`matched_range` is the machine-readable range, with source, reason, vendor/variant,
+and evidence retained in JSON.
+
+Correlation runs after endpoint checks. `software_evidence` preserves each distinct
+software observation, including separate HTTP Server header products and versions.
+The legacy combined HTTP fingerprint display remains for compatibility but is not
+used as correlation input. Conflicting versions for the same product remain in
+JSON and suppress automatic correlations, with an `INDETERMINATE` explanation in
+`correlation_diagnostics`. Distribution backports and undisclosed vendor patches
+cannot be established from a banner. No live vulnerability service or production
+CVE dataset is bundled; providers remain explicitly injected by callers.
+
+Existing port-state, dispatch, endpoint-count, and risk semantics are preserved.
+No new dependency or global Nmap version-detection flag is introduced.
+
+### Assessment terminal modes
+
+`netsentry assess TARGET` now defaults to a compact scanner-oriented report.
+Use `-v` or `--verbose` for the full analyst evidence view, including raw and
+normalized port states, identification attempts, protocol/certificate details,
+software observations, correlation diagnostics, and coverage evidence.
+
+Plain service names indicate confirmed identities. Parenthesized names such as
+`(ssh)` are service hints only. Displayed filtered ports require explicit scanner
+`filtered` evidence; the internal JSON `state` may still be `unknown` when the
+scanner reason is `no-response`. Ambiguous scanner states stay inconclusive.
+Closed and inconclusive ports are counted rather than individually listed;
+filtered lists show at most eight endpoints plus an omitted count.
+
+Check statuses describe completion, not a security pass. Findings appear first
+when present; potential CVEs remain separately labeled and do not affect risk.
+Observed risk describes assessed evidence only. Incomplete coverage remains visible.
+
+Terminal formatting has intentionally changed. JSON is the stable automation
+interface: `--json` retains its schema and semantics and takes precedence over
+`--verbose`. Rendering does not alter assessment evidence. The `scan` and
+`discover` terminal formats are unchanged.

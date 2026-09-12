@@ -249,7 +249,7 @@ class IdentificationDispatchTests(unittest.TestCase):
     def test_unusual_ssh_banner_probe_has_one_second_timeout(self):
         probe = Mock(return_value=SSH)
         assess_scan_result(HostScanResult(HOST, services=[PortService(2222, "tcp", "open")]), checks=[SSHConfigurationCheck(probe)])
-        probe.assert_called_once_with(HOST, port=2222, timeout=1.0)
+        probe.assert_called_once_with(HOST, port=2222, timeout=1.0, enumerate_security=True)
 
     def test_nmap_probed_identity_on_unusual_port(self):
         result = parse_nmap_xml(xml(port(2222, service='<service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6"/>'), requested="2222"))
@@ -383,8 +383,11 @@ class PortReportingTests(unittest.TestCase):
             with redirect_stdout(output):
                 printer(result)
             rendered = output.getvalue()
-            self.assertRegex(rendered, r"22/tcp\s+filtered\s+unknown \(hint: ssh\)")
-            self.assertRegex(rendered, r"80/tcp\s+unknown")
+            if printer is _print_assessment:
+                self.assertIn("Filtered: 22/tcp (ssh), 80/tcp (http)", rendered)
+            else:
+                self.assertRegex(rendered, r"22/tcp\s+filtered\s+unknown \(hint: ssh\)")
+                self.assertRegex(rendered, r"80/tcp\s+unknown")
             self.assertRegex(rendered, r"443/tcp\s+open\s+https")
 
     def test_closed_only_scan_still_prints_ports_and_zero_open(self):

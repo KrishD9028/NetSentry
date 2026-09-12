@@ -162,23 +162,22 @@ class RiskReportingTests(unittest.TestCase):
 
     def test_retest_terminal_scope_and_coverage(self):
         output = self.render(_print_assessment, retest_fixture())
-        for text in ("Overall Risk: UNKNOWN (limited coverage)", "Overall Risk Score: UNKNOWN",
-                     "Observed Risk: INFO", "Observed Risk Score: 0/10 (assessed evidence only)",
-                     "Open ports: 4", "Confirmed services: 2", "Open ports without confirmed service identity: 2",
-                     "Checks unavailable/failed/inconclusive: 0", "3 completed security checks"):
+        for text in ("Status: LIMITED", "Observed Risk: INFO (0/10)",
+                     "Coverage incomplete; overall target risk is unknown.",
+                     "4 open ports | 2 confirmed services | 3/3 checks completed"):
             self.assertIn(text, output)
         self.assertNotIn("Services discovered:", output)
 
     def test_high_finding_prominent_in_limited_terminal(self):
         output = self.render(_print_assessment, replace(retest_fixture(), findings=(finding(Severity.HIGH),)))
         self.assertIn("Observed Risk: HIGH", output)
-        self.assertIn("Observed Risk Score: 8/10", output)
+        self.assertIn("Observed Risk: HIGH (8/10)", output)
         self.assertIn("[HIGH] Accepted test finding", output)
-        self.assertIn("Overall Risk: UNKNOWN", output)
+        self.assertIn("overall target risk is unknown.", output)
 
     def test_no_completed_checks_terminal_does_not_claim_zero(self):
         output = self.render(_print_assessment, replace(retest_fixture(), checks=()))
-        self.assertIn("Observed Risk Score: UNKNOWN", output)
+        self.assertIn("Observed Risk: UNKNOWN", output)
         self.assertIn("No security checks completed", output)
 
     def test_network_ranks_known_observed_risk_ahead_of_complete_zero(self):

@@ -89,6 +89,24 @@ def _certificate_value(certificate: dict[str, Any], section: str, key: str) -> s
     return ", ".join(matches) if matches else None
 
 
+def certificate_metadata(connection) -> dict[str, Any]:
+    """Extract certificate observations from an existing TLS connection; no I/O requests."""
+    certificate = connection.getpeercert()
+    if not certificate:
+        certificate = _decode_peer_certificate(connection.getpeercert(binary_form=True))
+    now = dt.datetime.now(dt.timezone.utc)
+    cipher = connection.cipher()
+    return {
+        "tls_version": connection.version(), "cipher": cipher[0] if cipher else None,
+        "subject": _certificate_value(certificate, "subject", "commonName"),
+        "issuer": _certificate_value(certificate, "issuer", "organizationName"),
+        "not_before": certificate.get("notBefore"), "not_after": certificate.get("notAfter"),
+        "expired": _certificate_expired(certificate.get("notAfter"), now),
+        "not_yet_valid": _certificate_not_yet_valid(certificate.get("notBefore"), now),
+        "verification_result": "not performed (certificate verification disabled for observation)",
+    }
+
+
 def probe_tls(host: str, *, port: int, timeout: float = 3.0, socket_factory=socket.create_connection, context_factory=ssl.create_default_context) -> TLSProbeData:
     """Perform a read-only TLS handshake and optional HTTP header request."""
     context = context_factory()

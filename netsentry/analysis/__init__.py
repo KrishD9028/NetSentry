@@ -2,7 +2,8 @@
 
 from .engine import SecurityAnalyzer, assess_scan_result, assess_scan_results
 from .checks import ConfirmedFindingCheck, CompletedNoFindingCheck, ServiceCheck
-from .correlation import CorrelationStatus, SoftwareEvidence, VulnerabilityCorrelation
+from .correlation import CorrelationStatus, SoftwareEvidence, VulnerabilityCorrelation, VulnerabilityDefinition, StaticVulnerabilityProvider
+from .versions import AffectedVersionRange, MatchStatus, match_version
 from .fingerprinting import identify_service, merge_fingerprints
 from .models import (
     AssessmentCoverage,
@@ -19,6 +20,11 @@ from .models import (
 
 __all__ = [
     "Confidence",
+    "VulnerabilityDefinition",
+    "StaticVulnerabilityProvider",
+    "AffectedVersionRange",
+    "MatchStatus",
+    "match_version",
     "CorrelationStatus",
     "AssessmentCoverage",
     "AssessmentStatus",
