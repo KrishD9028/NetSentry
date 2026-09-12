@@ -421,31 +421,12 @@ class DNSConfigurationCheck(ProtocolServiceCheck):
             data = data if data is not None else self.collect(result, service)
         except ProbeError as exc:
             return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
-        findings = ()
-        if data.recursion_available is True:
-            findings = (Finding(f"{self.check_id}:RECURSION:{result.target}:{service.port}", "Open DNS recursion confirmed", "The DNS response indicated recursion is available.", Severity.MEDIUM, Confidence.MEDIUM, result.target, "DNS response set the recursion-available flag.", "Restrict recursion to authorized clients and trusted networks.", self.check_id, service.port, service.protocol, service.service),)
+        advertised = _yes_no_unknown(data.recursion_available).lower()
         return SecurityCheckResult(
-            self.check_id,
-            self.title,
-            CheckStatus.COMPLETED,
-            service.port,
-            service.protocol,
-            service.confirmed_service,
-            (
-                f"Transport tested: {data.transport}; DNS response: Valid; "
-                f"recursion requested: {'Yes' if data.recursion_requested else 'No'}; "
-                f"recursion available: {_yes_no_unknown(data.recursion_available)}; "
-                f"response code: {data.response_code or 'Unknown'}."
-            ),
-            findings,
-            {
-                "responded": data.responded,
-                "transport": data.transport,
-                "recursion_requested": data.recursion_requested,
-                "recursion_available": data.recursion_available,
-                "authoritative": data.authoritative,
-                "response_code": data.response_code,
-            },
+            self.check_id, self.title, CheckStatus.INCONCLUSIVE,
+            service.port, service.protocol, service.confirmed_service,
+            f"Recursion advertised: {advertised}; open recursion not established.",
+            (), asdict(data),
         )
 
 

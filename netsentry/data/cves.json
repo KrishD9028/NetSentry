@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "revision": "2026-09-11.1",
+  "reviewed": "2026-09-11",
+  "definition_count": 2,
+  "coverage_notes": "Two curated Apache HTTP Server advisories only; not comprehensive. Exact product token Apache from an HTTP Server header is supported. No fuzzy aliases, OpenSSH, platform inventory, configuration validation, or vendor backport detection. No match does not establish absence of vulnerabilities.",
+  "definitions": [
+    {
+      "cve_id": "CVE-2021-41773",
+      "product": "Apache",
+      "source": "Apache HTTP Server Project",
+      "reference": "https://httpd.apache.org/security/vulnerabilities_24.html#CVE-2021-41773",
+      "severity": "CRITICAL",
+      "ranges": [{"scheme": "numeric", "exact": "2.4.49"}],
+      "limitations": "Apache HTTP Server version correlation only. File disclosure depends on access controls outside aliased directories; code execution additionally depends on CGI configuration. Configuration, downstream patches, and exploitability have not been verified. Additional validation required."
+    },
+    {
+      "cve_id": "CVE-2021-42013",
+      "product": "Apache",
+      "source": "Apache HTTP Server Project",
+      "reference": "https://httpd.apache.org/security/vulnerabilities_24.html#CVE-2021-42013",
+      "severity": "CRITICAL",
+      "ranges": [
+        {"scheme": "numeric", "exact": "2.4.49"},
+        {"scheme": "numeric", "exact": "2.4.50"}
+      ],
+      "limitations": "Apache HTTP Server version correlation only. File disclosure depends on access controls outside aliased directories; code execution additionally depends on CGI configuration. Configuration, downstream patches, and exploitability have not been verified. Additional validation required."
+    }
+  ]
+}

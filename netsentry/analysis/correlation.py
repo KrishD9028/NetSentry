@@ -40,9 +40,11 @@ class VulnerabilityCorrelation:
     correlation_source: str | None = None
     matched_range: AffectedVersionRange | None = None
     match_reason: str | None = None
+    limitations: str | None = None
 
     def to_dict(self) -> dict:
         return {
+            **({"limitations": self.limitations} if self.limitations else {}),
             "cve_id": self.cve_id,
             "product": self.product,
             "affected_range": self.affected_range,
@@ -76,6 +78,7 @@ class VulnerabilityDefinition:
     variant: str | None = None
     severity: Severity | None = None
     cvss: float | None = None
+    limitations: str | None = None
 
 
 class StaticVulnerabilityProvider(VulnerabilityProvider):
@@ -121,6 +124,7 @@ class StaticVulnerabilityProvider(VulnerabilityProvider):
                         CorrelationStatus.POTENTIAL, evidence.confidence,
                         definition.severity, definition.cvss, definition.reference,
                         definition.vendor, definition.variant, definition.source, affected, match.reason,
+                        definition.limitations,
                     ))
                     break
         return tuple(results), tuple(diagnostics)

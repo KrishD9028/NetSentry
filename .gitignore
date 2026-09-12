@@ -20,5 +20,7 @@ venv/
 # NetSentry runtime data
 state/
 data/
+!netsentry/data/
+!netsentry/data/cves.json
 logs/
 reports/

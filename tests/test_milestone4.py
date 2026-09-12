@@ -72,10 +72,10 @@ class ServiceModuleTests(unittest.TestCase):
         )
         self.assertEqual({check.title for check in result.checks}, {"TLS configuration", "HTTP security configuration"})
 
-    def test_dns_recursion_requires_observed_flag(self):
+    def test_dns_recursion_flag_is_not_a_finding(self):
         result = DNSConfigurationCheck(lambda host, port: DNSProbeData(True, True, False)).run(HostScanResult("10.0.0.1"), svc(53, "domain"))
-        self.assertEqual(result.status, CheckStatus.COMPLETED)
-        self.assertEqual(result.findings[0].title, "Open DNS recursion confirmed")
+        self.assertEqual(result.status, CheckStatus.INCONCLUSIVE)
+        self.assertEqual(result.findings, ())
 
     def test_dns_tcp_response_preserves_transport_and_refusal(self):
         response = b"\x12\x34\x81\x05\x00\x01\x00\x00\x00\x00\x00\x00"
@@ -93,6 +93,8 @@ class ServiceModuleTests(unittest.TestCase):
 
             def sendall(self, data):
                 self.sent = data
+                reply = data[2:4] + response[2:] + data[14:]
+                self.remaining = len(reply).to_bytes(2, "big") + reply
 
             def recv(self, size):
                 result = self.remaining[:size]
@@ -136,7 +138,8 @@ class ServiceModuleTests(unittest.TestCase):
             def connect(self, address):
                 pass
             def sendall(self, data):
-                pass
+                reply = data[2:4] + response[2:] + data[14:]
+                self.remaining = len(reply).to_bytes(2, "big") + reply
             def recv(self, size):
                 result = self.remaining[:size]
                 self.remaining = self.remaining[size:]
@@ -169,7 +172,7 @@ class ServiceModuleTests(unittest.TestCase):
         result = DNSConfigurationCheck(lambda host, port: tcp_data).run(
             HostScanResult("10.0.0.1"), svc(53, "domain")
         )
-        self.assertEqual(result.status, CheckStatus.COMPLETED)
+        self.assertEqual(result.status, CheckStatus.INCONCLUSIVE)
         self.assertEqual(result.details["transport"], "TCP")
         self.assertEqual(result.details["response_code"], "REFUSED")
 

@@ -17,3 +17,6 @@ netsentry = "netsentry.main:main"
 
 [tool.setuptools.packages.find]
 include = ["netsentry*"]
+
+[tool.setuptools.package-data]
+netsentry = ["data/*.json"]

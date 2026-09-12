@@ -380,3 +380,57 @@ Terminal formatting has intentionally changed. JSON is the stable automation
 interface: `--json` retains its schema and semantics and takes precedence over
 `--verbose`. Rendering does not alter assessment evidence. The `scan` and
 `discover` terminal formats are unchanged.
+
+### Bundled real CVE correlations (Milestone 4)
+
+Normal `netsentry assess TARGET --profile common` and `--discovered` assessments
+load a small offline dataset automatically. Library callers still choose their
+own provider; `None` continues to disable correlation.
+
+Dataset revision **2026-09-11.1**, reviewed **2026-09-11**, contains **2 real CVE
+definitions** for Apache HTTP Server:
+
+| CVE | Affected versions | Authoritative source |
+| --- | --- | --- |
+| CVE-2021-41773 | 2.4.49 only | [Apache advisory](https://httpd.apache.org/security/vulnerabilities_24.html#CVE-2021-41773) |
+| CVE-2021-42013 | 2.4.49 and 2.4.50 only | [Apache advisory](https://httpd.apache.org/security/vulnerabilities_24.html#CVE-2021-42013) |
+
+The exact product token `Apache` emitted by HTTP Server headers is supported,
+with case-insensitive equality. No aliases were added: other product labels,
+including a scanner's `Apache httpd`, are not silently rewritten.
+Severity is Apache's advisory classification; no numeric CVSS is invented.
+
+These are version-based POTENTIAL correlations, not findings or exploitability
+claims. File disclosure depends on directory access controls; code execution
+also depends on CGI configuration. Each result retains these limitations and
+its advisory reference. Banner accuracy, configuration, and downstream patch
+status are unverified. Unknown versions and unsupported version suffixes do not
+match. Potential correlations never change observed or overall risk.
+
+Coverage is deliberately limited to these two advisories. There are no OpenSSH
+definitions in this revision: server/client, OS, and configuration applicability
+must be reviewed before adding any. No matches does not mean a host is free of
+vulnerabilities. No live CVE queries, downloads, or automatic updates occur.
+
+Metadata is available in `--verbose` output and in the packaged
+`netsentry/data/cves.json`. Maintainers update this file through reviewed changes:
+verify authoritative affected versions and limitations, increment the revision,
+update the review date/count, and add boundary regressions. Invalid or missing
+bundled data fails assessment visibly before scanning; it is never replaced
+with an empty provider. JSON correlations add a `limitations` field when supplied;
+existing fields and risk semantics are preserved.
+
+### DNS recursion evidence
+
+DNS `recursion_available` is retained for compatibility and means **recursion
+advertised** (RA), not demonstrated. The current bounded probe queries
+`example.com. IN A`, validates the response/question and record boundaries, and
+preserves flags, transport, answer records, and raw response bytes. It does not
+establish whether an answer was cached, local, forwarded, or recursively fetched.
+
+`recursion_demonstrated` and `open_recursion_confirmed` remain null. The DNS
+configuration assessment is INCONCLUSIVE even when DNS identity is confirmed.
+RA, NOERROR, authoritative answers, and public-looking answers generate no
+open-recursion finding and make no risk contribution. A DNS-only assessment can
+therefore have UNKNOWN observed risk because no security check completed.
+Controlled recursion and client-access-policy validation are deferred.

@@ -1,4 +1,5 @@
 import socket
+import secrets
 import re
 import time
 from dataclasses import dataclass
@@ -30,6 +31,15 @@ class DNSProbeData:
     transport: str = "UDP"
     response_code: str | None = None
     recursion_requested: bool = True
+    recursion_demonstrated: bool | None = None
+    open_recursion_confirmed: bool | None = None
+    query_name: str | None = None
+    query_type: int | None = None
+    query_class: int | None = None
+    answer_count: int = 0
+    answers: tuple[dict, ...] = ()
+    truncated: bool = False
+    raw_response: str | None = None
 
 
 from .rdp import RDPProbeData, probe_rdp
@@ -99,6 +109,7 @@ def probe_dns(
 ) -> DNSProbeData:
     """Send a low-impact DNS query using the transport observed by Nmap."""
     query = _dns_query()
+    deadline = time.monotonic() + timeout
     normalized_transport = transport.lower()
     if normalized_transport == "tcp":
         sock = socket_factory(socket.AF_INET, socket.SOCK_STREAM)
@@ -106,8 +117,11 @@ def probe_dns(
             sock.settimeout(timeout)
             sock.connect((host, port))
             sock.sendall(len(query).to_bytes(2, "big") + query)
-            prefix = _recv_exact(sock, 2)
-            response = _recv_exact(sock, int.from_bytes(prefix, "big"))
+            prefix = _recv_exact(sock, 2, deadline=deadline)
+            length = int.from_bytes(prefix, "big")
+            if not 12 <= length <= 16384:
+                raise ProbeError("DNS TCP response length is outside bounds")
+            response = _recv_exact(sock, length, deadline=deadline)
         except TimeoutError as exc:
             raise ProbeError(f"DNS TCP query timed out: {exc}") from exc
         except ConnectionResetError as exc:
@@ -121,7 +135,9 @@ def probe_dns(
         try:
             sock.settimeout(timeout)
             sock.sendto(query, (host, port))
-            response, _ = sock.recvfrom(4096)
+            response, peer = sock.recvfrom(4096)
+            if peer != (host, port):
+                raise ProbeError("DNS UDP response came from an unexpected endpoint")
         except TimeoutError as exc:
             raise ProbeError(f"DNS UDP query timed out: {exc}") from exc
         except OSError as exc:
@@ -136,7 +152,7 @@ def probe_dns(
 def _dns_query() -> bytes:
     name = b"\x07example\x03com\x00"
     # RD=1 requests recursion; the query is read-only and has no side effects.
-    return b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + name + b"\x00\x01\x00\x01"
+    return secrets.token_bytes(2) + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + name + b"\x00\x01\x00\x01"
 
 
 def _recv_exact(sock, size: int, protocol: str = "DNS TCP", deadline: float | None = None) -> bytes:
@@ -154,12 +170,81 @@ def _recv_exact(sock, size: int, protocol: str = "DNS TCP", deadline: float | No
     return bytes(chunks)
 
 
+def _dns_name(message: bytes, offset: int):
+    """Decode bounded labels/compression; reject cycles and oversized names."""
+    labels, visited = [], set()
+    end = None
+    wire_length = 1
+    for _ in range(128):
+        if offset >= len(message) or offset in visited:
+            raise ProbeError("DNS name is truncated or has a compression loop")
+        visited.add(offset)
+        size = message[offset]
+        if size & 0xC0 == 0xC0:
+            if offset + 1 >= len(message):
+                raise ProbeError("DNS compression pointer is truncated")
+            pointer = ((size & 0x3F) << 8) | message[offset + 1]
+            if pointer < 12 or pointer >= offset:
+                raise ProbeError("DNS compression pointer is invalid")
+            end = end if end is not None else offset + 2
+            offset = pointer
+            continue
+        if size & 0xC0 or offset + 1 + size > len(message):
+            raise ProbeError("DNS label is malformed")
+        offset += 1
+        if size == 0:
+            return tuple(labels), end if end is not None else offset
+        wire_length += size + 1
+        if wire_length > 255:
+            raise ProbeError("DNS name exceeds size limit")
+        labels.append(message[offset:offset + size].lower())
+        offset += size
+    raise ProbeError("DNS name exceeds decoding limit")
+
+
+def _dns_question(message: bytes):
+    name, offset = _dns_name(message, 12)
+    if offset + 4 > len(message):
+        raise ProbeError("DNS question is truncated")
+    return (name, int.from_bytes(message[offset:offset + 2], "big"),
+            int.from_bytes(message[offset + 2:offset + 4], "big")), offset + 4
+
+
 def _parse_dns_response(query: bytes, response: bytes, transport: str) -> DNSProbeData:
-    if len(response) < 12:
+    if not 12 <= len(response) <= 16384:
         raise ProbeError("DNS response was malformed")
-    if response[0:2] != query[0:2] or not (response[2] & 0x80):
-        raise ProbeError("DNS response was not a valid response to the query")
     flags = int.from_bytes(response[2:4], "big")
+    if response[:2] != query[:2] or not flags & 0x8000 or flags & 0x7800:
+        raise ProbeError("DNS response was not a valid response to the query")
+    counts = [int.from_bytes(response[i:i + 2], "big") for i in (4, 6, 8, 10)]
+    if counts[0] != 1 or sum(counts[1:]) > 128:
+        raise ProbeError("DNS section counts are outside bounds")
+    expected, _ = _dns_question(query)
+    question, offset = _dns_question(response)
+    if question != expected:
+        raise ProbeError("DNS response question does not match query")
+    answers = []
+    for section, count in enumerate(counts[1:]):
+        for _ in range(count):
+            name, offset = _dns_name(response, offset)
+            if offset + 10 > len(response):
+                raise ProbeError("DNS resource record is truncated")
+            kind = int.from_bytes(response[offset:offset + 2], "big")
+            record_class = int.from_bytes(response[offset + 2:offset + 4], "big")
+            ttl = int.from_bytes(response[offset + 4:offset + 8], "big")
+            length = int.from_bytes(response[offset + 8:offset + 10], "big")
+            offset += 10
+            if offset + length > len(response):
+                raise ProbeError("DNS record data is truncated")
+            raw = response[offset:offset + length]
+            if kind in {1, 28} and length != (4 if kind == 1 else 16):
+                raise ProbeError("DNS address record has invalid length")
+            if section == 0:
+                answers.append({"name": b".".join(name).decode("ascii", "backslashreplace") + ".",
+                                "type": kind, "class": record_class, "ttl": ttl, "rdata_hex": raw.hex()})
+            offset += length
+    if offset != len(response):
+        raise ProbeError("DNS response has unexpected trailing data")
     response_code = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}.get(flags & 0x000F, f"RCODE-{flags & 0x000F}")
     return DNSProbeData(
         responded=True,
@@ -168,4 +253,8 @@ def _parse_dns_response(query: bytes, response: bytes, transport: str) -> DNSPro
         transport=transport,
         response_code=response_code,
         recursion_requested=bool(query[2] & 0x01),
+        query_name=b".".join(question[0]).decode("ascii") + ".",
+        query_type=question[1], query_class=question[2],
+        answer_count=counts[1], answers=tuple(answers),
+        truncated=bool(flags & 0x0200), raw_response=response.hex(),
     )

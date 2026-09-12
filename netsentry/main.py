@@ -5,6 +5,7 @@ import logging
 import time
 from collections import Counter
 
+from .analysis.bundled_cves import DatasetError, load_bundled_provider
 from .analysis import Severity, assess_scan_result
 from .discovery import (
     DiscoveryError,
@@ -239,6 +240,8 @@ def _print_assessment_details(assessment) -> None:
             print(f"  Source: {correlation.get('correlation_source') or 'Unspecified'}")
             if correlation.get("reference"):
                 print(f"  Reference: {correlation['reference']}")
+            if correlation.get("limitations"):
+                print(f"  Limitations: {correlation['limitations']}")
             print(f"  Confidence: {correlation['confidence']}")
             print(f"  Status: {correlation['status']} - additional validation required")
         if not assessment.findings:
@@ -295,7 +298,13 @@ def _check_summary(check) -> str:
         return _compact_text(check.reason or "No completed assessment evidence.")
     service = (check.service or check.title.split()[0]).lower()
     if service == "smb":
-        signing = {True: "signing required", False: "signing not required"}.get(details.get("signing_required"), "signing requirement unknown")
+        signing_required = details.get("signing_required")
+        if signing_required is True:
+            signing = "signing required"
+        elif signing_required is False:
+            signing = "signing not required"
+        else:
+            signing = "signing requirement unknown"
         values = [details.get("dialect"), signing]
     elif service == "tls":
         values = [details.get("tls_version"), details.get("cipher")]
@@ -388,7 +397,20 @@ def _print_assessment(assessment, *, verbose=False) -> None:
         print("POTENTIAL CVE CORRELATIONS (not confirmed findings)")
         for item in assessment.potential_correlations:
             evidence = item.get("evidence", {})
-            print(_compact_text(f"{item.get('cve_id')} — {item.get('product')} {evidence.get('version') or 'unknown version'}; validation required"))
+            print(_compact_text(item.get("cve_id")))
+            print(f"  Product: {_compact_text(item.get('product'))}")
+            print(f"  Observed version: {_compact_text(evidence.get('version') or 'unknown')}")
+            matched_range = item.get("matched_range") or {}
+            range_label = (f"exactly {matched_range['exact']} ({matched_range['scheme']})"
+                           if matched_range.get("exact") else matched_range or item.get("affected_range") or "unavailable")
+            print(f"  Affected range: {_compact_text(range_label)}")
+            print(f"  Severity: {_compact_text(item.get('severity') or 'Unspecified')} (advisory)")
+            print("  Status: POTENTIAL — additional validation required.")
+            print(f"  Source: {_compact_text(item.get('correlation_source') or 'Unspecified')}")
+            if item.get("reference"):
+                print(f"  Reference: {_compact_text(item['reference'], 300)}")
+            if item.get("limitations"):
+                print(f"  Limitations: {_compact_text(item['limitations'], 600)}")
         print()
     coverage = assessment.coverage
     print("COVERAGE")
@@ -555,6 +577,13 @@ def _run_assess(args: argparse.Namespace) -> int:
             print(message)
         return 2
 
+    try:
+        vulnerability_provider, dataset_metadata = load_bundled_provider()
+    except DatasetError as exc:
+        message = f"CVE dataset load failed: {exc}"
+        print(json.dumps({"error": message}) if args.json else message)
+        return 1
+
     assessments = []
     errors = []
     for target in targets:
@@ -562,7 +591,7 @@ def _run_assess(args: argparse.Namespace) -> int:
             if not args.json:
                 logger.info("Assessing %s %s using profile %s", ip_visibility(target), target, args.profile)
             result = scan_target(target, profile=args.profile, port_spec=args.ports, timeout=args.timeout)
-            assessments.append(assess_scan_result(result))
+            assessments.append(assess_scan_result(result, vulnerability_provider=vulnerability_provider))
         except (NmapNotInstalledError, NmapScanError, ValueError) as exc:
             errors.append({"target": target, "error": str(exc)})
             if not args.json:
@@ -586,6 +615,9 @@ def _run_assess(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 1 if errors and not assessments else 0
 
+    if args.verbose:
+        print("BUNDLED CVE DATASET")
+        print(json.dumps(dataset_metadata, indent=2))
     for assessment in assessments:
         _print_assessment(assessment, verbose=args.verbose)
         print()
