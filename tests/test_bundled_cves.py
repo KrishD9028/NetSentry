@@ -19,6 +19,7 @@ from netsentry.analysis.checks import HTTPConfigurationCheck
 from netsentry.analysis.correlation import SoftwareEvidence
 from netsentry.analysis.engine import assess_scan_result
 from netsentry.analysis.models import Confidence
+from netsentry.planning import Budget
 from netsentry.analysis.service_probes import HTTPProbeData
 from netsentry.discovery.models import Device
 from netsentry.main import _build_parser, _run_assess
@@ -37,13 +38,13 @@ def http_check(version):
 
 
 def cli(version="2.4.49", flags=()):
-    # Only network acquisition is replaced. The CLI, evidence collection, bundled
+    # Network acquisition and elapsed time are controlled. The CLI, evidence collection, bundled
     # loader, version matcher, and correlation binding all run normally.
     scan = HostScanResult(HOST, services=[PortService(80, "tcp", "open")], scan_profile="common")
     output = StringIO()
     with patch("netsentry.main.scan_target", return_value=scan), patch(
         "netsentry.analysis.engine.default_service_checks", return_value=(http_check(version),)
-    ), redirect_stdout(output):
+    ), patch("netsentry.planning.loop.Budget", side_effect=lambda limits: Budget(limits, clock=lambda: 0)), redirect_stdout(output):
         result = _run_assess(_build_parser().parse_args(["assess", HOST, "--profile", "common", *flags]))
     return result, output.getvalue()
 

@@ -6,7 +6,8 @@ import time
 from collections import Counter
 
 from .analysis.bundled_cves import DatasetError, load_bundled_provider
-from .analysis.identity_resolution import IdentityResolver, enrich_identity
+from .analysis.identity_resolution import enrich_identity
+from .planning import AdaptiveIdentityResolver as IdentityResolver
 from .analysis import Severity, assess_scan_result
 from .analysis.risk import finding_order, host_order
 from .analysis.remediation import priority_actions
@@ -224,6 +225,9 @@ def _print_assessment(assessment, *, verbose=False, dataset_metadata=None) -> No
     if verbose and assessment.host_identity:
         from .terminal_details import host_identity_details
         host_identity_details(assessment.host_identity)
+    if verbose and assessment.planning_trace:
+        from .terminal_details import planning_details
+        planning_details(assessment.planning_trace)
     observations = sorted(assessment.observations, key=lambda item: (item.port, item.protocol))
     groups = {state: [] for state in ("open", "closed", "filtered", "inconclusive")}
     for item in observations:

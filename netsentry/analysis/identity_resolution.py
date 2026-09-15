@@ -185,5 +185,5 @@ def enrich_identity(assessment, scan, resolver=None, discovery=None, vulnerabili
                 bound = bind_correlation(candidate, current)
                 if bound is not None:
                     correlations.append(bound.to_dict())
-    return replace(assessment, host_identity=evidence.to_dict(), software_evidence=tuple(software),
+    return replace(assessment, host_identity=evidence.to_dict(), planning_trace=getattr(resolver, "trace", assessment.planning_trace), software_evidence=tuple(software),
                    potential_correlations=tuple(correlations), correlation_diagnostics=tuple(diagnostics))

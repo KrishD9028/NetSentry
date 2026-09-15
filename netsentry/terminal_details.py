@@ -252,3 +252,25 @@ def host_identity_details(identity):
         detail("Endpoint", attempt.get("endpoint"))
         detail("Reason", attempt["reason"])
     print()
+
+
+def planning_details(trace):
+    print('ENUMERATION PLANNING')
+    detail('Planner', trace['planner'])
+    for index, step in enumerate(trace['steps'], 1):
+        selected = step['selected']
+        if selected:
+            detail(f'Step {index}', f"{selected['action_id']} at port {selected['port']}")
+            detail('Selection reasoning', selected['reason'])
+            detail('Policy', step['policy_decision'])
+            if step['result']:
+                detail('Result', f"{step['result']['status']}: {step['result']['reason']}")
+            for change in step['changes']:
+                detail('Knowledge change', f"{change['attribute']}: {change['before']} → {change['after']}")
+        for candidate in step['candidates']:
+            if candidate['rejection']:
+                detail('Not selected', f"{candidate['proposal']['action_id']}: {candidate['rejection']}")
+    detail('Stopped', trace['stopping_reason'])
+    detail('Actions remaining', trace['remaining_budget']['actions_remaining'])
+    detail('Network requests remaining', trace['remaining_budget']['network_requests_remaining'])
+    print()

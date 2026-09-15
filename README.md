@@ -603,3 +603,91 @@ Coverage's “open ports without confirmed service identity” refers to endpoin
 protocol/service identification, not unresolved hostnames or operating systems.
 Windows-associated banners, SMB dialects, and RPC annotations do not establish
 Windows identity, edition, patch state, or CPE merely by appearing together.
+
+### Deterministic adaptive enumeration foundation
+
+`netsentry assess` now selects identity follow-ups through a deterministic planning
+loop in `netsentry/planning/`, including discovered-host assessment. The original
+`IdentityResolver` remains available to library callers. Initial scanning, protocol
+security checks, findings, scoring, remediation, and CVE policy remain separate.
+No LLM, API client, command runner, authentication, or exploitation was added.
+
+The loop derives `KnowledgeState` from the current assessment and `HostEvidence`:
+confirmed/probable/conflicting facts, endpoints and protocol layers, software
+observations, potential CVE candidates, attempts, unresolved goals, source keys,
+and remaining planning budget. It does not promote hypotheses. It rebuilds this
+view after each result. Goals distinguish hostname, OS family/build, service and
+product identification, software version conflicts, and CPE candidates. Missing
+versions associated with potential CVE candidates have higher priority; this goal
+weight has no effect on vulnerability applicability or risk.
+
+`ActionRegistry` holds trusted `ActionDefinition` objects with stable IDs, evidence
+outputs/source keys, service/port/address-family requirements, prerequisites,
+heuristic information value, costs, timeout, network allowance, safety class,
+authentication requirement, repeatability metadata, and a handler. Its `catalog()`
+exports JSON-safe descriptors without handler references. A future AI adapter can
+receive this catalog and a knowledge snapshot, never implementation handles.
+
+The initial adapters reuse existing probes:
+
+| Action | Applicability | Evidence and limits |
+| --- | --- | --- |
+| `netbios_identity` | Open SMB/NetBIOS endpoint; IPv4 only | One UDP/137 node-status request; hostname/workgroup/MAC |
+| `rdp_identity` | Open RDP endpoint | Existing bounded TLS/CredSSP probe; stops after NTLM challenge |
+| `rpc_identity` | Open MSRPC endpoint | Existing single NDR32 mapper page, at most eight entries; interface/annotation evidence |
+
+The registry deliberately does **not** advertise RPC as an OS-edition probe. RPC
+may help identify an unknown open service, but already-known RPC inventory can be
+too low-value to justify another request. Existing SMB/TLS/RDP metadata is collected
+before planning. No additional SMB negotiation is introduced.
+
+Both future planners and `DeterministicPlanner` implement the `Planner` protocol,
+returning only `ProposedAction(action_id, port, reason)`. The target host comes from
+the assessment; timeout and transport come from policy/registered capabilities.
+A separate executor independently rechecks applicability, prerequisites, policy,
+usefulness, previous attempts, and budget. It rejects unregistered IDs and invalid
+parameters. Result ingestion validates the structured result, output attributes,
+source keys per output attribute, endpoint, probe identity, and evidence bounds.
+TLS certificate evidence cannot act as an independent vote for an NTLM OS version. Network observations
+cannot claim authoritative status at this boundary. Partial valid evidence from
+inconclusive results is retained. Unexpected programming exceptions remain visible.
+
+Ranking is a transparent integer heuristic: sum useful goal importance, double
+contradiction weight, multiply by the action's information-value weight, then
+subtract declared cost, network allowance, noise, and timeout penalties. Evidence
+from already-used sources is treated as redundant. Actions with no positive net
+value are not selected. Ties use action ID then port, independent of registry
+insertion order. These weights are neither confidence percentages nor risk scores.
+
+Automatic execution is restricted to LOCAL, PASSIVE, and SAFE_ACTIVE actions that
+require no authentication. AUTHENTICATED, INTRUSIVE, and EXPLOITATIVE are metadata
+placeholders; even an expanded policy allowlist cannot enable them. Registry code
+is trusted application code, not a sandbox for arbitrary plugins or generated code.
+
+Default planning limits are three actions, eight seconds total, three seconds per
+action, and twelve logical network-request units. An optional noise budget can
+further restrict execution. Requests are conservatively reserved **before** a
+handler runs, including failed attempts: NetBIOS reserves one unit, RDP four, RPC
+three. These units represent bounded protocol exchanges, not an IP-packet counter;
+TCP/TLS implementation packets are not counted individually. Built-in handlers
+honor the supplied deadline. Custom trusted handlers must honor the same contract;
+there is no process-isolation watchdog to forcibly terminate arbitrary Python code.
+Repeatable metadata cannot override the current one-attempt-per-action/endpoint
+limit. A separate iteration ceiling prevents a faulty replacement planner looping.
+The budget applies to this follow-up phase, not the preceding scanner/check phase.
+
+Optional assessment JSON field `planning_trace` records goals, all candidates and
+rejections, selection/explanation, expected outputs, declared costs, budget snapshots,
+executor decision, result, evidence/goal changes, and stopping reason. Existing
+assessment fields remain intact. Actual elapsed-time values naturally differ across
+runs. Verbose `ENUMERATION PLANNING` interprets the trace; compact output does not
+print it. Goals can remain unresolved when no useful permitted capability exists.
+
+This is a foundation, not a complete adaptive capability catalog. Current result
+adapters ingest host observations; future software/version, CPE, and CVE-investigation
+adapters must feed their canonical evidence pipelines rather than add a competing
+fact store. They are not implemented by merely registering a goal. Before adding
+an AI planner, live-test selection/deadlines, review capability costs and provenance
+contracts, implement needed evidence adapters, and validate an untrusted JSON proposal
+decoder plus adversarial policy-boundary tests. The executor and policy ceiling must
+remain outside the AI adapter's control.

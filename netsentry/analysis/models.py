@@ -239,6 +239,7 @@ class HostAssessment:
     software_evidence: tuple[dict, ...] = ()
     correlation_diagnostics: tuple[dict, ...] = ()
     host_identity: dict | None = None
+    planning_trace: dict | None = None
 
     @property
     def risk_score(self) -> int | None:
@@ -303,6 +304,7 @@ class HostAssessment:
             "host": self.host,
             "host_label": ip_visibility(self.host),
             **({"host_identity": self.host_identity} if self.host_identity is not None else {}),
+            **({"planning_trace": self.planning_trace} if self.planning_trace is not None else {}),
             "assessment_status": self.status.value,
             "status_reason": self.status_reason,
             "scan_profile": self.scan_profile,
