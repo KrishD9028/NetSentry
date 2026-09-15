@@ -5,6 +5,7 @@ import socket
 import ssl
 import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,24 @@ class ProbeError(RuntimeError):
     """Raised when a safe network probe cannot complete."""
 
 
+@contextmanager
+def _quiet_smb_worker():
+    # smbprotocol logs this worker exception and then re-raises it on the
+    # calling thread. NetSentry reports that exception as structured evidence.
+    # Filter at the emitting logger (parent filters do not filter children).
+    logger = logging.getLogger("smbprotocol.connection")
+    def redundant_worker_error(record):
+        return not (record.name == "smbprotocol.connection"
+                    and record.msg == "SMB receive worker died (outstanding=%d)"
+                    and record.exc_info)
+    logger.addFilter(redundant_worker_error)
+    try:
+        yield
+    finally:
+        logger.removeFilter(redundant_worker_error)
+
+
+@_quiet_smb_worker()
 def probe_smb(host: str, *, port: int = 445, timeout: float = 2.0, socket_factory=socket.create_connection) -> SMBProbeData:
     """Perform an unauthenticated SMB negotiate using smbprotocol."""
     logging.getLogger("smbprotocol").setLevel(logging.WARNING)

@@ -163,7 +163,8 @@ class BundledDatasetTests(unittest.TestCase):
 
     def test_cli_verbose_metadata_and_json_precedence(self):
         _, output = cli(flags=("--verbose",))
-        self.assertIn("BUNDLED CVE DATASET", output)
+        self.assertIn("CVE CORRELATION", output)
+        self.assertNotIn("BUNDLED CVE DATASET", output)
         self.assertIn(self.metadata["revision"], output)
         self.assertEqual(cli(flags=("--json",))[1], cli(flags=("--json", "--verbose"))[1])
 

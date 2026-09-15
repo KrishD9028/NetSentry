@@ -361,8 +361,8 @@ No new dependency or global Nmap version-detection flag is introduced.
 ### Assessment terminal modes
 
 `netsentry assess TARGET` now defaults to a compact scanner-oriented report.
-Use `-v` or `--verbose` for the full analyst evidence view, including raw and
-normalized port states, identification attempts, protocol/certificate details,
+Use `-v` or `--verbose` for interpreted analyst details, including scanner-reported
+and normalized port states, identification attempts, protocol/certificate properties,
 software observations, correlation diagnostics, and coverage evidence.
 
 Plain service names indicate confirmed identities. Parenthesized names such as
@@ -434,3 +434,172 @@ RA, NOERROR, authoritative answers, and public-looking answers generate no
 open-recursion finding and make no risk contribution. A DNS-only assessment can
 therefore have UNKNOWN observed risk because no security check completed.
 Controlled recursion and client-access-policy validation are deferred.
+
+### Milestone 5: risk and actionable remediation
+
+The centralized policy in `analysis/risk.py` preserves severity scores:
+INFO **0**, LOW **2**, MEDIUM **5**, HIGH **8**, CRITICAL **10**. Observed risk is
+the maximum accepted finding; without findings it is INFO/0 only if a security
+check completed, otherwise UNKNOWN/null. Overall risk is UNKNOWN/null unless
+assessment status is COMPLETE. COMPLETE describes the assessed scan coverage,
+not a guarantee that every possible vulnerability was checked.
+
+Confidence is the existing LOW/MEDIUM/HIGH evidence confidence, not a probability.
+It affects action priority and tie-breaking, not severity or numeric score.
+Base priorities are INFORMATIONAL, LOW, NORMAL, HIGH, and IMMEDIATE respectively.
+IMMEDIATE requires a CRITICAL finding with HIGH confidence and direct
+configuration or demonstrated-vulnerability evidence; otherwise CRITICAL remains
+HIGH priority. A HIGH-confidence MEDIUM finding becomes HIGH priority only when
+explicit evidence establishes external reachability or critical service importance.
+Private/local exposure never discounts severity. Within a priority, severity,
+confidence, evidence kind, supported exposure and importance determine ordering;
+endpoint and rule identifiers break ties deterministically.
+
+The scanner currently cannot establish Internet reachability or business importance.
+Those nullable finding fields can be supplied by integrations with explicit
+supporting evidence; an IP address or conventional port number is never used to
+infer them. Configuration evidence is not evidence of exploitation. Potential
+CVE severity orders separate advisory-validation work and never enters finding
+scores, remediation actions, or host risk.
+
+Each finding preserves its legacy remediation string and adds structured
+`remediation_details`, `remediation_priority`, and `risk_context`.
+SMBv1/signing, TLS validity, and obsolete SSH algorithm findings have specific
+guidance and safe verification steps. Unknown/custom rules retain their original
+guidance with an explicitly LOW-applicability fallback. Applicability confidence
+describes how well guidance fits the observation, not proof that a rollout is
+safe. Disruption-free changes remain null because deployment compatibility and
+restart behavior have not been established.
+
+Host JSON adds `overall_risk` (same values as legacy `risk`),
+`risk_explanation`, `priority_actions`, and `correlation_validation_actions`.
+Existing risk/coverage keys and null semantics remain unchanged. Correlation
+validation instructs the operator to confirm installed version, vendor/variant,
+downstream patches and advisory conditions before deciding whether to remediate.
+
+Compact reports show at most five priority actions near the top. Full guidance
+and all actions are in verbose/JSON. Network summaries show hosts with findings,
+incomplete assessments, unknown observed risk, and the highest-priority actions.
+Hosts rank primarily by observed score, then finding priority/confidence; unknown
+hosts remain explicitly unknown and are counted separately, never labeled safe.
+No scanner behavior, protocol requests, dependencies, or automated remediation
+actions were added.
+
+### Human-readable verbose reports
+
+Verbose expands the normal report sections with interpreted protocol properties,
+service/check evidence, remediation and validation guidance, status reasoning,
+and coverage statistics. Nullable properties display as Unknown. Probe failures
+and contradictions remain visible; long detail lists are bounded with omitted
+counts pointing to JSON.
+
+Raw XML, packet hex, scanner blobs, and full serialized models are available
+through `--json`, not verbose terminal output. Unknown/custom check detail objects
+are not dumped; check status and reason remain visible. JSON continues to take
+precedence over `--verbose`. No debug mode was added.
+
+Identification now follows recognized service hints before conventional ports.
+SSH is selected for SSH hints, SMB for 445/139, RDP for 3389, HTTP for 80/8080,
+and TLS followed by HTTP for 443/8443. Existing confirmed identities still govern
+security-check dispatch. Known unsupported hints such as MSRPC do not trigger
+an unrelated probe sweep. Ambiguous endpoints retain one bounded SSH banner
+fallback; failure of a known hinted protocol does not trigger exhaustive probing.
+A misleading hint can therefore leave identity unconfirmed. Hints never establish
+identity or findings by themselves.
+
+Verbose port evidence uses concise state/reason descriptions and groups routine
+filtered/no-response or closed results sharing the same evidence. Open ports,
+confirmed identities, unusual states, contradictory state evidence and identification
+attempts retain individual details. Full raw/normalized fields remain in JSON.
+
+Verbose cleanup: the bundled dataset revision/count and applicable-match count
+appear in a lower-priority CVE CORRELATION section. Full catalog metadata remains
+in the packaged dataset. Scanner filtered/no-response counts explicitly explain
+why NetSentry retains UNKNOWN; normalized state fields are unchanged.
+
+During SMB probing, the specific smbprotocol receive-worker exception log is
+suppressed through disconnect because the same exception is returned to NetSentry
+and preserved as structured probe-failure evidence. The temporary logger filter
+is removed afterward. Other library errors and NetSentry exceptions are not
+suppressed; application stderr is not redirected.
+
+### Bounded host identity follow-ups
+
+The assessment CLI (including discovered-host and JSON modes) reuses scanner,
+SMB, TLS, RDP, and software observations before scheduling identity follow-ups.
+This identity layer does not change port normalization, security checks, accepted
+findings, coverage, or risk. Library `HostAssessment.host_identity` remains optional;
+`enrich_identity` can collect passive evidence with no resolver, or use an injected
+`IdentityResolver`. Existing assessment JSON fields are preserved. The optional
+`host_identity` object adds `attributes`, raw `observations`, and `attempts`.
+
+Identity follow-ups are selected only for observed open TCP endpoints with relevant
+service evidence or conventional hints, with at most three probes and an eight-second
+host budget. Each active TCP probe uses the remaining budget capped at three seconds.
+No endpoint is retried during the same resolution. Missing implementations and
+exhausted budgets have explicit reasons. Built-in probe reads and writes use the
+remaining deadline; injected probes must honor the supplied timeout.
+
+- RDP follows a CredSSP selection with TLS and an NTLM NEGOTIATE request. It stops
+  after reading the challenge; no credentials or AUTHENTICATE message are sent.
+  Certificate and NTLM observations survive a subsequent failure independently.
+- NetBIOS node status uses **IPv4 UDP/137**, prompted by relevant open SMB/NetBIOS
+  endpoints. This is not IPv6 NetBIOS support and does not reinterpret TCP/139 state.
+- DCE/RPC requests one NDR32 endpoint-mapper page of at most eight entries. It
+  attempts to release a returned enumeration context, never follows further pages,
+  and preserves interface UUID/version and annotation evidence. Fragmented,
+  authenticated, oversized, or unsupported replies remain inconclusive. ONC RPC
+  (`rpcbind`) does not select this DCE/RPC probe.
+
+Identity states are CONFIRMED, PROBABLE, UNRESOLVED, or CONTRADICTORY. Confirmation
+requires an explicitly authoritative observation or agreeing independent sources
+of at least medium confidence. Multiple NTLM fields share one source, certificate
+subjects share one certificate source, NetBIOS names share one node-status source,
+and RPC entries share one mapper source. Scanner/discovery DNS names do not count
+as independent votes. Source grouping is deliberately conservative: certificates
+on multiple services and repeated NTLM responses do not multiply confirmations.
+Conflicts retain every observation; unresolved fields carry explanations and attempts.
+
+SMB dialects are protocol versions, never Windows versions. Windows-compatible
+protocols and NTLM version data support OS hypotheses, not edition or patch-state
+claims. NTLM build values are retained verbatim. Automatic OS correlation is withheld
+when builds conflict or Windows product identity is unconfirmed. No Windows release
+mapping or new CVE definitions were added; provider applicability rules and POTENTIAL
+status remain unchanged. The bundled curated dataset has no Windows coverage, and
+absence of a match does not establish absence of vulnerabilities.
+
+Verbose HOST IDENTITY output separates resolved attributes, source/probe/endpoint
+observations, and reused/new attempts. Compact reports do not display these diagnostics.
+Raw identity observations that are not resolved attributes (GUIDs, banners, protocol
+versions, RPC interfaces) remain available in JSON and interpreted verbose evidence.
+Unauthenticated names may be configured, shared, or emulated; OS edition and patch
+state commonly remain unresolved. No live-host interoperability retest is implied
+by the in-memory protocol fixtures.
+
+The RPC fixtures use the NDR32 endpoint-entry and tower layouts described in the
+[Impacket endpoint-mapper implementation](https://github.com/fortra/impacket/blob/master/impacket/dcerpc/v5/epm.py).
+Pytest collection is restricted to `tests/` to keep unrelated workspace projects
+outside NetSentry validation.
+
+Host-identity reporting distinguishes unresolved goals from network activity.
+When no applicable identity probe exists, the explanation appears under the
+specific unresolved attribute. JSON retains the legacy `probe: "planner"`,
+`status`, `attributes`, and `reason` fields for compatibility and adds
+`kind: "unresolved_goal"`; these records do not represent network requests.
+Older planner records remain readable by the verbose renderer.
+
+Software product and version observations from the same response share endpoint,
+source, probe, and independence key. HTTP (including every product token in a
+Server header), SSH, and Nmap software evidence keep their collected provenance.
+When source host/port information is missing, the identity endpoint stays null;
+no `host:None` endpoint is manufactured.
+
+HTTPS denotes the service stack **HTTP over TLS**. HTTP is the application layer;
+TLS supplies the transport/security layer. Verbose output labels these roles,
+while JSON keeps existing `service: "https"`, `confirmed_service`, and individual
+HTTP/TLS identity evidence. The stack and its layers are not three independent
+host-identity confirmations. No source-independence or resolution rules change.
+Coverage's “open ports without confirmed service identity” refers to endpoint
+protocol/service identification, not unresolved hostnames or operating systems.
+Windows-associated banners, SMB dialects, and RPC annotations do not establish
+Windows identity, edition, patch state, or CPE merely by appearing together.

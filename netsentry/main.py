@@ -6,7 +6,14 @@ import time
 from collections import Counter
 
 from .analysis.bundled_cves import DatasetError, load_bundled_provider
+from .analysis.identity_resolution import IdentityResolver, enrich_identity
 from .analysis import Severity, assess_scan_result
+from .analysis.risk import finding_order, host_order
+from .analysis.remediation import priority_actions
+from .terminal_details import (
+    text as interpreted_text, detail, check_details, port_evidence_summary, finding_details, coverage_details,
+    correlation_details, correlation_range,
+)
 from .discovery import (
     DiscoveryError,
     discover_devices,
@@ -132,143 +139,6 @@ def _print_scan_result(result) -> None:
     print(f"Open ports: {result.open_ports}")
 
 
-def _print_assessment_details(assessment) -> None:
-    print("NetSentry Security Assessment")
-    print("==============================")
-    print()
-    print(f"Host: {ip_visibility(assessment.host)}: {assessment.host}")
-    print(f"Assessment Status: {assessment.status.value}")
-    print(f"Status Reason: {assessment.status_reason}")
-    qualifier = " (limited coverage)" if assessment.status.value == "LIMITED" else ""
-    print(f"Overall Risk: {assessment.risk_level.value}{qualifier}")
-    score = f"{assessment.risk_score}/10" if assessment.risk_score is not None else "UNKNOWN"
-    print(f"Overall Risk Score: {score}")
-    print(f"Observed Risk: {assessment.observed_risk_level.value}")
-    observed_score = f"{assessment.observed_risk_score}/10" if assessment.observed_risk_score is not None else "UNKNOWN"
-    print(f"Observed Risk Score: {observed_score} (assessed evidence only)")
-    if not assessment.findings:
-        if assessment.coverage.checks_completed:
-            print(f"No findings were identified by the {assessment.coverage.checks_completed} completed security checks.")
-        else:
-            print("No security checks completed; observed risk cannot be determined.")
-    if assessment.status.value != "COMPLETE":
-        print("Incomplete assessment prevents a complete target-risk determination.")
-    print()
-    print("Attack Surface")
-    if assessment.observations:
-        _print_port_table(assessment.observations)
-    else:
-        print("No port-state evidence was returned within scan coverage.")
-    print()
-    print("Security Checks")
-    if not assessment.checks:
-        print("No applicable service-specific checks were available.")
-    for check in assessment.checks:
-        print(f"{check.title}: {check.status.value}")
-        if check.reason:
-            print(f"  {check.reason}")
-        if check.details:
-            if check.title == "SSH configuration":
-                print(f"  Banner: {check.details.get('banner') or 'Unavailable'}")
-                print(f"  Enumeration: {check.details.get('enumeration_status', 'unavailable')}")
-                for category, algorithms in check.details.get("algorithms", {}).items():
-                    if algorithms:
-                        print(f"  {category}: {', '.join(algorithms)}")
-            elif check.title == "RDP security negotiation":
-                details = check.details
-                for name in ("nla_available", "nla_required", "legacy_accepted", "tls_used"):
-                    print(f"  {name}: {_yes_no_unknown(details.get(name))}")
-                for attempt in details.get("attempts", ()):
-                    print(f"  Requested={attempt['requested_protocols']} selected={attempt.get('selected_protocol')} "
-                          f"failure={attempt.get('failure_code')}: {attempt['status']} - {attempt['reason']}")
-                    if attempt.get("tls_error"):
-                        print(f"    TLS: {attempt['tls_error']}")
-            elif check.title == "SMB configuration":
-                details = check.details
-                print(f"  Negotiated dialect: {details.get('dialect') or 'Unknown'}")
-                print(f"  SMBv1 supported: {_yes_no_unknown(details.get('smb1_supported'))}")
-                print(f"  Signing supported: {_yes_no_unknown(details.get('signing_supported'))}")
-                print(f"  Signing required: {_yes_no_unknown(details.get('signing_required'))}")
-                print(f"  Authentication: {details.get('authentication_status', 'Unknown')}")
-                if details.get("identity"):
-                    print(f"  Server identity: {details['identity']}")
-            elif check.title == "TLS configuration":
-                details = check.details
-                print(f"  TLS version: {details.get('tls_version') or 'Unavailable'}")
-                print(f"  Cipher: {details.get('cipher') or 'Unavailable'}")
-                print(f"  Subject: {details.get('subject') or 'Unavailable'}")
-                print(f"  Issuer: {details.get('issuer') or 'Unavailable'}")
-                print(f"  Valid from: {details.get('not_before') or 'Unavailable'}")
-                print(f"  Valid until: {details.get('not_after') or 'Unavailable'}")
-                print(f"  Verification: {details.get('verification_result') or 'Unavailable'}")
-                print(f"  Expired: {_yes_no_unknown(details.get('expired'))}")
-                print(f"  Not yet valid: {_yes_no_unknown(details.get('not_yet_valid'))}")
-            elif check.title == "HTTP security configuration":
-                details = check.details
-                print(f"  Transport: {'TLS' if details.get('tls') else 'plaintext TCP'}")
-                print(f"  HTTP response: {'Valid' if details.get('status') is not None else 'Unavailable'}")
-                print(f"  Status: {details.get('status') or 'Unavailable'}")
-                print(f"  Server: {details.get('server') or 'Unreported'}")
-                print(f"  Redirect: {details.get('redirect') or 'None'}")
-                print(f"  Advertised methods: {', '.join(details.get('methods', ())) or 'Unreported'}")
-                for header, value in details.get('selected_headers', {}).items():
-                    print(f"  {header}: {value}")
-    print()
-    print("Assessment Coverage")
-    coverage = assessment.coverage
-    print(f"Open ports: {coverage.open_ports}")
-    print(f"Confirmed services: {coverage.confirmed_services}")
-    print(f"Open ports without confirmed service identity: {coverage.unconfirmed_open_ports}")
-    print(f"Security checks attempted: {coverage.checks_attempted}")
-    print(f"Checks completed: {coverage.checks_completed}")
-    print(f"Checks unavailable/failed/inconclusive: {coverage.checks_unavailable_or_failed}")
-    if assessment.unimplemented_services:
-        print(f"{assessment.unimplemented_services} observed services currently have no registered assessment module.")
-    print()
-    indeterminate = sum(item.get("status") == "INDETERMINATE" for item in assessment.correlation_diagnostics)
-    if indeterminate:
-        print(f"CVE correlation: {indeterminate} indeterminate evaluations; details are preserved in JSON.")
-    print(f"Findings: {len(assessment.findings)}")
-    if not assessment.findings:
-        print("No security findings were generated by the current NetSentry ruleset.")
-    if assessment.potential_correlations:
-        print()
-        print("Potential Vulnerability Correlations")
-        for correlation in assessment.potential_correlations:
-            print(f"{correlation['cve_id']}: {correlation['product']} {correlation['evidence'].get('version') or 'unknown version'}")
-            print(f"  Affected range: {correlation.get('matched_range') or correlation['affected_range']}")
-            print(f"  Source: {correlation.get('correlation_source') or 'Unspecified'}")
-            if correlation.get("reference"):
-                print(f"  Reference: {correlation['reference']}")
-            if correlation.get("limitations"):
-                print(f"  Limitations: {correlation['limitations']}")
-            print(f"  Confidence: {correlation['confidence']}")
-            print(f"  Status: {correlation['status']} - additional validation required")
-        if not assessment.findings:
-            return
-    elif not assessment.findings:
-        return
-
-    for finding in assessment.findings:
-        print()
-        print(f"[{finding.severity.value}] {finding.title}")
-        print(f"Rule: {finding.rule_id}")
-        if finding.port is not None:
-            print(f"Port: {finding.port}/{finding.protocol or 'tcp'}")
-        print(f"Confidence: {finding.confidence.value}")
-        print()
-        print("Evidence:")
-        print(finding.evidence)
-        print()
-        print("Why this matters:")
-        print(finding.description)
-        print()
-        print("Remediation:")
-        print(finding.remediation)
-        print("-" * 48)
-
-
-
 def _compact_text(value, limit=160) -> str:
     # Evidence may contain line breaks or terminal control characters.
     text = " ".join("".join(char if char.isprintable() else " " for char in str(value)).split())
@@ -292,7 +162,7 @@ def _service_label(observation) -> str:
     return "unknown"
 
 
-def _check_summary(check) -> str:
+def _check_summary(check, *, verbose=False) -> str:
     details = check.details or {}
     if check.status.value != "COMPLETED":
         return _compact_text(check.reason or "No completed assessment evidence.")
@@ -317,41 +187,25 @@ def _check_summary(check) -> str:
                   "TLS used: " + _yes_no_unknown(details.get("tls_used"))]
     else:
         values = []
-    return _compact_text(", ".join(str(value) for value in values if value is not None) or check.reason or "Check completed.")
+    return _compact_text(", ".join(interpreted_text(value) if verbose else str(value) for value in values if value is not None) or check.reason or "Check completed.")
 
 
-def _print_compact_findings(assessment) -> None:
+def _print_compact_findings(assessment, *, verbose=False) -> None:
     print("FINDINGS")
     if not assessment.findings:
         print("No security findings.")
-    for finding in sorted(assessment.findings, key=lambda item: (-item.score, item.port or 0, item.title)):
+    for finding in sorted(assessment.findings, key=finding_order):
         endpoint = f"{finding.host}:{finding.port}/{finding.protocol or 'tcp'}" if finding.port is not None else finding.host
         service = f" ({_compact_text(finding.service, 60)})" if finding.service else ""
         print(f"[{finding.severity.value}] {_compact_text(finding.title)}")
         print(f"  {endpoint}{service} — {_compact_text(finding.evidence)}")
+        print(f"  Confidence: {finding.confidence.value}; remediation priority: {finding.to_dict()['remediation_priority']}")
+        if verbose:
+            finding_details(finding)
     print()
 
 
-def _print_assessment(assessment, *, verbose=False) -> None:
-    if verbose:
-        _print_assessment_details(assessment)
-        # Render all structured fields, including evidence not covered by the
-        # explanatory report above. This is a read-only view of the same payload.
-        payload = assessment.to_dict()
-        for title, value in (
-            ("PORT EVIDENCE (state = normalized NetSentry state)", payload["attack_surface"]),
-            ("FULL CHECK EVIDENCE", payload["security_checks"]),
-            ("SOFTWARE OBSERVATIONS", payload["software_evidence"]),
-            ("POTENTIAL CVE CORRELATIONS (not confirmed findings)", payload["potential_vulnerability_correlations"]),
-            ("CORRELATION DIAGNOSTICS", payload["correlation_diagnostics"]),
-            ("COVERAGE EVIDENCE", {key: payload[key] for key in (
-                "coverage", "status_reason", "scan_profile", "requested_ports", "reachability",
-                "probe_status", "unimplemented_services", "scan_evidence")}),
-        ):
-            print("\n" + title)
-            print(json.dumps(value, indent=2))
-        return
-
+def _print_assessment(assessment, *, verbose=False, dataset_metadata=None) -> None:
     print("NetSentry Security Assessment")
     print("==============================\n")
     print(f"Target: {assessment.host}")
@@ -362,8 +216,14 @@ def _print_assessment(assessment, *, verbose=False) -> None:
         print("Coverage incomplete; overall target risk is unknown.")
     print()
     if assessment.findings:
-        _print_compact_findings(assessment)
+        print("PRIORITY ACTIONS")
+        _print_priority_actions(assessment.priority_actions)
+        print()
+        _print_compact_findings(assessment, verbose=verbose)
 
+    if verbose and assessment.host_identity:
+        from .terminal_details import host_identity_details
+        host_identity_details(assessment.host_identity)
     observations = sorted(assessment.observations, key=lambda item: (item.port, item.protocol))
     groups = {state: [] for state in ("open", "closed", "filtered", "inconclusive")}
     for item in observations:
@@ -383,16 +243,20 @@ def _print_assessment(assessment, *, verbose=False) -> None:
         print("Not shown: " + " | ".join(hidden))
     if any(item.service_hint and item.identification_status != "CONFIRMED" for item in groups["open"] + groups["filtered"][:8]):
         print("Parentheses indicate service hints.")
+    if verbose:
+        port_evidence_summary(observations)
     print("\nSECURITY CHECKS")
     for check in sorted(assessment.checks, key=lambda item: (item.port or 0, item.check_id)):
         name = _compact_text(check.service or check.title.split()[0], 20).upper()
         endpoint = f"{check.port}/{check.protocol or 'tcp'}" if check.port is not None else "-"
-        print(f"{name:<8} {endpoint:<11} {check.status.value:<12} {_check_summary(check)}")
+        print(f"{name:<8} {endpoint:<11} {check.status.value:<12} {_check_summary(check, verbose=verbose)}")
+        if verbose:
+            check_details(check)
     if not assessment.checks:
         print("No security checks completed; no applicable checks were available.")
     print()
     if not assessment.findings:
-        _print_compact_findings(assessment)
+        _print_compact_findings(assessment, verbose=verbose)
     if assessment.potential_correlations:
         print("POTENTIAL CVE CORRELATIONS (not confirmed findings)")
         for item in assessment.potential_correlations:
@@ -403,7 +267,7 @@ def _print_assessment(assessment, *, verbose=False) -> None:
             matched_range = item.get("matched_range") or {}
             range_label = (f"exactly {matched_range['exact']} ({matched_range['scheme']})"
                            if matched_range.get("exact") else matched_range or item.get("affected_range") or "unavailable")
-            print(f"  Affected range: {_compact_text(range_label)}")
+            print(f"  Affected range: {correlation_range(item) if verbose else _compact_text(range_label)}")
             print(f"  Severity: {_compact_text(item.get('severity') or 'Unspecified')} (advisory)")
             print("  Status: POTENTIAL — additional validation required.")
             print(f"  Source: {_compact_text(item.get('correlation_source') or 'Unspecified')}")
@@ -411,6 +275,22 @@ def _print_assessment(assessment, *, verbose=False) -> None:
                 print(f"  Reference: {_compact_text(item['reference'], 300)}")
             if item.get("limitations"):
                 print(f"  Limitations: {_compact_text(item['limitations'], 600)}")
+            if verbose:
+                detail("Match reasoning", item.get("match_reason"))
+                detail("Evidence confidence", item.get("confidence"))
+                detail("Validation", "Verify installed version, vendor/variant, downstream fixes and advisory conditions before deciding whether remediation applies.")
+        print()
+    if verbose and dataset_metadata is not None:
+        print("CVE CORRELATION")
+        detail("Dataset", f"bundled revision {dataset_metadata['revision']}")
+        detail("Definitions", dataset_metadata["definition_count"])
+        detail("Applicable matches", len(assessment.potential_correlations))
+        detail("Coverage", "Limited curated dataset; absence of a match does not establish absence of vulnerabilities.")
+    if verbose and (assessment.software_evidence or assessment.correlation_diagnostics):
+        if not assessment.potential_correlations:
+            print("POTENTIAL CVE CORRELATIONS (not confirmed findings)")
+            print("No potential matches reported; this does not establish absence of vulnerabilities.")
+        correlation_details(assessment)
         print()
     coverage = assessment.coverage
     print("COVERAGE")
@@ -420,12 +300,17 @@ def _print_assessment(assessment, *, verbose=False) -> None:
     incomplete = [f"{counts[status]} {status.lower()}" for status in ("UNAVAILABLE", "FAILED", "INCONCLUSIVE") if counts[status]]
     if incomplete:
         print("Checks: " + " | ".join(incomplete))
+    if verbose:
+        coverage_details(assessment)
 
 def _print_network_assessment_summary(assessments: list) -> None:
     counts = Counter(finding.severity for assessment in assessments for finding in assessment.findings)
     print("NETWORK ASSESSMENT SUMMARY")
     print()
     print(f"Hosts assessed: {len(assessments)}")
+    print(f"Hosts with findings: {sum(bool(item.findings) for item in assessments)}")
+    print(f"Incomplete assessments: {sum(item.status.value != 'COMPLETE' for item in assessments)}")
+    print(f"Hosts with unknown observed risk: {sum(item.observed_risk_score is None for item in assessments)}")
     print(f"Total findings: {sum(counts.values())}")
     for severity in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO):
         print(f"{severity.value}: {counts.get(severity, 0)}")
@@ -433,27 +318,50 @@ def _print_network_assessment_summary(assessments: list) -> None:
     print("Highest observed-risk hosts (assessed evidence only):")
     ranked_assessments = sorted(
         assessments,
-        key=lambda item: (item.observed_risk_score is None, -(item.observed_risk_score or 0), item.host),
+        key=host_order,
     )
     for index, assessment in enumerate(ranked_assessments[:5], start=1):
         host_display = f"{ip_visibility(assessment.host)}: {assessment.host}"
         score = f"{assessment.risk_score}/10" if assessment.risk_score is not None else "UNKNOWN"
         observed_score = f"{assessment.observed_risk_score}/10" if assessment.observed_risk_score is not None else "UNKNOWN"
         overall = "UNKNOWN" if assessment.risk_score is None else f"{assessment.risk_level.value} {score}"
-        print(f"{index}. {host_display}  Observed: {assessment.observed_risk_level.value} {observed_score}; "
+        observed = "UNKNOWN" if assessment.observed_risk_score is None else f"{assessment.observed_risk_level.value} {observed_score}"
+        print(f"{index}. {host_display}  Observed: {observed}; "
               f"Assessment: {assessment.status.value}; Overall: {overall}")
+
+    print("\nNETWORK PRIORITY ACTIONS")
+    actions = priority_actions(tuple(finding for assessment in assessments for finding in assessment.findings))
+    if actions:
+        _print_priority_actions(actions, include_host=True)
+    else:
+        print("No finding-based actions; incomplete assessments may require further evidence.")
+
+
+def _print_priority_actions(actions, *, include_host=False):
+    for index, action in enumerate(actions[:5], 1):
+        endpoint = action["endpoint"]
+        address = f"{endpoint['port']}/{endpoint['protocol'] or 'tcp'}" if endpoint["port"] is not None else "host"
+        if include_host:
+            address = f"{endpoint['host']}:{address}"
+        print(f"{index}. [Priority: {action['priority']}] {_compact_text(action['action'], 100)} — {address}")
+    if len(actions) > 5:
+        print(f"{len(actions) - 5} more actions in verbose/JSON output.")
 
 
 def _network_assessment_payload(assessments: list) -> dict:
     counts = Counter(finding.severity.value for assessment in assessments for finding in assessment.findings)
     ranked_assessments = sorted(
         assessments,
-        key=lambda item: (item.observed_risk_score is None, -(item.observed_risk_score or 0), item.host),
+        key=host_order,
     )
     return {
         "assessments": [assessment.to_dict() for assessment in assessments],
         "network_summary": {
             "hosts_assessed": len(assessments),
+            "hosts_with_findings": sum(bool(item.findings) for item in assessments),
+            "incomplete_assessments": sum(item.status.value != "COMPLETE" for item in assessments),
+            "unknown_observed_risk_hosts": sum(item.observed_risk_score is None for item in assessments),
+            "priority_actions": priority_actions(tuple(finding for item in assessments for finding in item.findings)),
             "total_findings": sum(counts.values()),
             "severity_counts": {severity.value: counts.get(severity.value, 0) for severity in Severity},
             "highest_risk_hosts": [
@@ -591,7 +499,9 @@ def _run_assess(args: argparse.Namespace) -> int:
             if not args.json:
                 logger.info("Assessing %s %s using profile %s", ip_visibility(target), target, args.profile)
             result = scan_target(target, profile=args.profile, port_spec=args.ports, timeout=args.timeout)
-            assessments.append(assess_scan_result(result, vulnerability_provider=vulnerability_provider))
+            assessment = assess_scan_result(result, vulnerability_provider=vulnerability_provider)
+            device = next((item for item in devices if item.ip == target), None) if args.discovered else None
+            assessments.append(enrich_identity(assessment, result, IdentityResolver(), device, vulnerability_provider))
         except (NmapNotInstalledError, NmapScanError, ValueError) as exc:
             errors.append({"target": target, "error": str(exc)})
             if not args.json:
@@ -615,11 +525,8 @@ def _run_assess(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 1 if errors and not assessments else 0
 
-    if args.verbose:
-        print("BUNDLED CVE DATASET")
-        print(json.dumps(dataset_metadata, indent=2))
     for assessment in assessments:
-        _print_assessment(assessment, verbose=args.verbose)
+        _print_assessment(assessment, verbose=args.verbose, dataset_metadata=dataset_metadata)
         print()
     if args.discovered:
         _print_network_assessment_summary(assessments)

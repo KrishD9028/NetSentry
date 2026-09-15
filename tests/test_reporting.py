@@ -10,6 +10,7 @@ from netsentry.analysis.models import (
     AttackSurfaceObservation, HostAssessment, SecurityCheckResult,
     CheckStatus, AssessmentStatus, Finding, Severity, Confidence,
 )
+from netsentry.analysis.identity_resolution import IdentityResolver
 from netsentry.main import _print_assessment, _build_parser, _run_assess
 
 HOST = "100.100.201.201"
@@ -99,9 +100,9 @@ class ReportingTests(unittest.TestCase):
                              correlation_diagnostics=({"status": "INDETERMINATE"},))
         before = json.dumps(assessment.to_dict())
         output = render(assessment, True)
-        for token in ('"state": "unknown"', '"scanner_state": "filtered"', '"scanner_reason": "no-response"',
-                      '"scanner_source": "Nmap XML port"', '"identities"', '"identification_attempts"',
-                      'CN=fixture CA', 'SOFTWARE OBSERVATIONS', 'INDETERMINATE', 'COVERAGE EVIDENCE'):
+        for token in ("NetSentry interpretation: unknown", "filtered; Nmap XML port; no-response",
+                      "18 tcp ports with shared evidence", "Confirmed protocol: tls", "Identification attempt: http",
+                      "CN=fixture CA", "Software observation: example", "INDETERMINATE", "Assessment reasoning:"):
             self.assertIn(token, output)
         self.assertEqual(before, json.dumps(assessment.to_dict()))
 
@@ -137,6 +138,7 @@ class ReportingTests(unittest.TestCase):
         self.assertIn(HOST + ":445/tcp (smb)", output)
         self.assertIn("POTENTIAL CVE CORRELATIONS (not confirmed findings)", output)
 
+    @patch("netsentry.main.IdentityResolver", lambda: IdentityResolver(probes={}))
     @patch("netsentry.main.assess_scan_result")
     @patch("netsentry.main.scan_target")
     def test_json_verbose_exact_bytes(self, scan, assess):
@@ -149,9 +151,13 @@ class ReportingTests(unittest.TestCase):
                 code = _run_assess(_build_parser().parse_args(["assess", HOST] + flags))
             self.assertEqual(code, 0)
             outputs.append(output.getvalue())
-        self.assertEqual(outputs[0], json.dumps(assessment.to_dict(), indent=2) + "\n")
+        payload = json.loads(outputs[0])
+        self.assertIn("host_identity", payload)
+        payload.pop("host_identity")
+        self.assertEqual(payload, assessment.to_dict())
         self.assertEqual(outputs[0], outputs[1])
 
+    @patch("netsentry.main.IdentityResolver", lambda: IdentityResolver(probes={}))
     @patch("netsentry.main.load_current_snapshot")
     @patch("netsentry.main.assess_scan_result")
     @patch("netsentry.main.scan_target")
@@ -165,6 +171,6 @@ class ReportingTests(unittest.TestCase):
                 _run_assess(_build_parser().parse_args(["assess", "--discovered"] + flags))
             text = output.getvalue()
             self.assertEqual(text.count("NetSentry Security Assessment"), 2)
-            self.assertEqual(text.count("PORT EVIDENCE"), 2 if verbose else 0)
-            self.assertEqual(text.count("Filtered: 22/tcp (ssh)"), 0 if verbose else 2)
+            self.assertEqual(text.count("18 tcp ports with shared evidence"), 2 if verbose else 0)
+            self.assertEqual(text.count("Filtered: 22/tcp (ssh)"), 2)
             self.assertIn("NETWORK ASSESSMENT SUMMARY", text)

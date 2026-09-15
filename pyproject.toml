@@ -20,3 +20,6 @@ include = ["netsentry*"]
 
 [tool.setuptools.package-data]
 netsentry = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

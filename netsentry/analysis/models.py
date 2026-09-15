@@ -3,6 +3,8 @@ from enum import Enum
 from typing import Any
 
 from ..ip import ip_visibility
+from .risk import SEVERITY_SCORES, score_finding, score_assessment, risk_explanation, remediation_priority, supported_context
+from .remediation import remediation_details, priority_actions, correlation_validation
 
 
 class Severity(str, Enum):
@@ -14,13 +16,7 @@ class Severity(str, Enum):
 
     @property
     def score(self) -> int:
-        return {
-            Severity.INFO: 0,
-            Severity.LOW: 2,
-            Severity.MEDIUM: 5,
-            Severity.HIGH: 8,
-            Severity.CRITICAL: 10,
-        }[self]
+        return SEVERITY_SCORES[self.value]
 
 
 class Confidence(str, Enum):
@@ -120,9 +116,28 @@ class Finding:
     service: str | None = None
     references: tuple[str, ...] = ()
 
+    evidence_kind: str | None = None
+    exposure: str | None = None
+    exposure_evidence: str | None = None
+    service_importance: str | None = None
+    service_importance_evidence: str | None = None
+    remediation_key: str | None = None
+
+    def __post_init__(self):
+        if self.evidence_kind not in {None, "observation", "configuration", "demonstrated_vulnerability"}:
+            raise ValueError("Unsupported finding evidence kind")
+        if self.exposure not in {None, "external", "private", "local"}:
+            raise ValueError("Unsupported exposure scope")
+        if self.service_importance not in {None, "standard", "critical"}:
+            raise ValueError("Unsupported service importance")
+
+    @property
+    def remediation_details(self) -> dict:
+        return remediation_details(self)
+
     @property
     def score(self) -> int:
-        return self.severity.score
+        return score_finding(self)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +155,9 @@ class Finding:
             "references": list(self.references),
             "rule_id": self.rule_id,
             "score": self.score,
+            "remediation_priority": remediation_priority(self).value,
+            "remediation_details": self.remediation_details,
+            "risk_context": supported_context(self),
         }
 
 
@@ -220,19 +238,15 @@ class HostAssessment:
     port_summary: tuple[dict, ...] = ()
     software_evidence: tuple[dict, ...] = ()
     correlation_diagnostics: tuple[dict, ...] = ()
+    host_identity: dict | None = None
 
     @property
     def risk_score(self) -> int | None:
-        if self.risk_level is RiskLevel.UNKNOWN:
-            return None
-        return max((finding.score for finding in self.findings), default=0)
+        return score_assessment(self, overall=True)[1]
 
     @property
     def risk_severity(self) -> RiskLevel:
-        if self.status is not AssessmentStatus.COMPLETE:
-            return RiskLevel.UNKNOWN
-        highest = max((finding.severity for finding in self.findings), key=lambda severity: severity.score, default=Severity.INFO)
-        return RiskLevel(highest.value)
+        return RiskLevel(score_assessment(self, overall=True)[0])
 
     @property
     def risk_level(self) -> RiskLevel:
@@ -240,19 +254,19 @@ class HostAssessment:
 
     @property
     def observed_risk_level(self) -> RiskLevel:
-        """Severity of accepted findings, scoped to assessed evidence only."""
-        if self.findings:
-            highest = max(self.findings, key=lambda finding: finding.score)
-            return RiskLevel(highest.severity.value)
-        if any(check.status is CheckStatus.COMPLETED for check in self.checks):
-            return RiskLevel.INFO
-        return RiskLevel.UNKNOWN
+        return RiskLevel(score_assessment(self)[0])
 
     @property
     def observed_risk_score(self) -> int | None:
-        if self.observed_risk_level is RiskLevel.UNKNOWN:
-            return None
-        return max((finding.score for finding in self.findings), default=0)
+        return score_assessment(self)[1]
+
+    @property
+    def priority_actions(self) -> list[dict]:
+        return priority_actions(self.findings)
+
+    @property
+    def overall_risk(self) -> dict:
+        return {"severity": self.risk_level.value, "score": self.risk_score}
 
     @property
     def observed_risk(self) -> dict[str, Any]:
@@ -288,6 +302,7 @@ class HostAssessment:
         return {
             "host": self.host,
             "host_label": ip_visibility(self.host),
+            **({"host_identity": self.host_identity} if self.host_identity is not None else {}),
             "assessment_status": self.status.value,
             "status_reason": self.status_reason,
             "scan_profile": self.scan_profile,
@@ -304,6 +319,12 @@ class HostAssessment:
                 "score": self.risk_score,
             },
             "observed_risk": self.observed_risk,
+            "overall_risk": self.overall_risk,
+            "risk_explanation": risk_explanation(self),
+            "priority_actions": self.priority_actions,
+            "correlation_validation_actions": sorted(
+                (correlation_validation(item) for item in self.potential_correlations),
+                key=lambda item: (-SEVERITY_SCORES.get(item["advisory_severity"], 0), item["cve_id"] or "")),
             "attack_surface": [observation.to_dict() for observation in self.observations],
             "security_checks": [check.to_dict() for check in self.checks],
             "coverage": self.coverage.to_dict(),

@@ -238,7 +238,7 @@ class IdentificationDispatchTests(unittest.TestCase):
             probe = Mock(return_value=SSH)
             check = SSHConfigurationCheck(probe)
             check.run = Mock(wraps=check.run)
-            result = assess_scan_result(HostScanResult(HOST, services=[PortService(number, "tcp", "open")]), checks=[check])
+            result = assess_scan_result(HostScanResult(HOST, services=[PortService(number, "tcp", "open", "ssh" if number == 443 else None)]), checks=[check])
             probe.assert_called_once()
             check.run.assert_called_once()
             self.assertEqual(result.observations[0].service, "ssh")

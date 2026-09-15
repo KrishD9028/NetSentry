@@ -4,7 +4,7 @@ import re
 import inspect
 from dataclasses import asdict, replace
 
-from ..scanning.models import HostScanResult, PortService, ServiceIdentity
+from ..scanning.models import HostScanResult, PortService, ServiceIdentity, PORT_HINTS
 from .models import CheckStatus, Confidence, Finding, SecurityCheckResult, Severity
 from .probes import ProbeError, SMBProbeData, TLSProbeData, probe_smb, probe_tls
 from .service_probes import DNSProbeData, HTTPProbeData, RDPProbeData, SSHProbeData, probe_dns, probe_http, probe_rdp, probe_ssh
@@ -113,13 +113,17 @@ class ProtocolServiceCheck(ServiceCheck):
             return False  # Existing protocol evidence already permits dispatch.
         if service.confirmed_protocols:
             return self.protocol_name == "http" and service.confirmed_protocols == ("tls",)
-        if self.protocol_name == "ssh":
-            # One passive banner read also recognizes SSH on unconventional ports.
-            return True
         hint = (service.service_hint or "").lower()
-        return service.port in self.hint_ports or hint in self.hint_names or (
-            self.protocol_name == "http" and hint.startswith("http-")
-        )
+        if hint in self.hint_names or (self.protocol_name == "http" and hint.startswith("http-")):
+            return True
+        known_hints = set(PORT_HINTS.values()) | {"dns", "smb", "rdp", "tls", "ssl", "http", "https"}
+        if hint in known_hints:
+            return False  # A known service hint takes precedence over the port.
+        if service.port in self.hint_ports:
+            return True
+        # Ambiguous endpoints get one bounded SSH banner fallback, not a sweep
+        # through all supported protocols. Failed known hints stay unconfirmed.
+        return self.protocol_name == "ssh"
 
     def collect(self, result: HostScanResult, service: PortService):
         options = {"port": service.port}
@@ -150,7 +154,11 @@ def identify_for_checks(checks, result: HostScanResult, service: PortService):
     """Prepare evidence and cache successful probe data for subsequent checks."""
     collected = {}
     attempts = list(service.identification_attempts)
-    for check in checks:
+    ordered = sorted(checks, key=lambda check: (
+        0 if getattr(check, "protocol_name", None) == "tls" else
+        2 if getattr(check, "protocol_name", None) == "ssh" and service.service_hint != "ssh" else 1
+    ))
+    for check in ordered:
         if not isinstance(check, ProtocolServiceCheck) or not check.candidate(service):
             continue
         try:
@@ -173,8 +181,8 @@ def identify_for_checks(checks, result: HostScanResult, service: PortService):
 
 class SMBConfigurationCheck(ProtocolServiceCheck):
     protocol_name = "smb"
-    hint_ports = frozenset({445})
-    hint_names = frozenset({"smb", "microsoft-ds"})
+    hint_ports = frozenset({445, 139})
+    hint_names = frozenset({"smb", "microsoft-ds", "netbios-ssn"})
 
     def protocol_demonstrated(self, data) -> bool:
         return bool(data.dialect)
@@ -206,6 +214,7 @@ class SMBConfigurationCheck(ProtocolServiceCheck):
                 evidence="Unauthenticated SMB negotiation reported SMBv1 support.",
                 remediation="Disable SMBv1 and require a current SMB dialect where compatibility permits.",
                 rule_id=self.check_id,
+                evidence_kind="configuration",
             ))
         if data.signing_required is False:
             findings.append(Finding(
@@ -221,6 +230,7 @@ class SMBConfigurationCheck(ProtocolServiceCheck):
                 evidence="Unauthenticated SMB negotiate response reported signing as supported but not required.",
                 remediation="Require SMB signing where operationally appropriate and restrict SMB exposure.",
                 rule_id=self.check_id,
+                evidence_kind="configuration",
             ))
         return SecurityCheckResult(
             self.check_id,
@@ -328,6 +338,7 @@ class SSHConfigurationCheck(ProtocolServiceCheck):
                     f"Server SSH_MSG_KEXINIT {category} list includes {algorithm}.",
                     "Remove the obsolete algorithm from the server configuration and repeat enumeration.",
                     self.check_id, service.port, service.protocol, service.confirmed_service, (reference,),
+                    evidence_kind="configuration", remediation_key="ssh_obsolete_algorithm",
                 ))
         complete = data.enumeration_status == "completed" and all(data.algorithms.get(key) for key in (
             "kex", "host_key", "cipher_client_to_server", "cipher_server_to_client", "mac_client_to_server", "mac_server_to_client"))
@@ -472,6 +483,7 @@ def _tls_finding(result: HostScanResult, service: PortService, title: str, descr
         evidence=f"TLS handshake succeeded on TCP/{service.port}; certificate validity was evaluated.",
         remediation=remediation,
         rule_id="NS-CHECK-TLS",
+        evidence_kind="configuration",
     )
 
 

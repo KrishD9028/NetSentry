@@ -15,6 +15,7 @@ from .models import (
     SecurityCheckResult,
 )
 from .rules import SecurityRule
+from .risk import finding_order
 
 
 class SecurityAnalyzer:
@@ -110,7 +111,7 @@ class SecurityAnalyzer:
         rule_result = replace(result, services=[item for item in prepared_services if item.confirmed_protocols])
         for rule in self.rules:
             findings.extend(rule.evaluate(rule_result))
-        findings.sort(key=lambda finding: (-finding.score, finding.rule_id, finding.port or 0))
+        findings.sort(key=finding_order)
         if result.reachability is False:
             status = AssessmentStatus.UNREACHABLE
             reason = "The target was not reachable during enumeration."
