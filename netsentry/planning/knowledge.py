@@ -23,6 +23,7 @@ class KnowledgeState:
     observations: tuple[dict, ...]
     attempts: tuple[dict, ...]
     budget: dict
+    completed_checks: tuple[dict, ...] = ()
 
     @classmethod
     def derive(cls, assessment, evidence, budget):
@@ -59,12 +60,12 @@ class KnowledgeState:
                                       'RPC interface inventory is useful metadata, not OS identity.', item['port']))
         software = tuple(dict(item) for item in assessment.software_evidence)
         for item in software:
-            if not item.get('version'):
+            if not item.get('version') and not any(s.get('version') and s['product'] == item['product'] and s.get('port') == item.get('port') for s in software):
                 cve_needs_version = any(c.get('product') == item['product'] for c in assessment.potential_correlations)
                 goals.append(Goal(f"version:{item.get('port')}:{item['product']}", 'software_version', 'UNRESOLVED',
                                   10 if cve_needs_version else 7,
                                   'Product version is required for CVE applicability.' if cve_needs_version else 'Version evidence enables applicability decisions.',
-                                  item.get('port'), item['product']))
+                                  item.get('port'), item['product'], sources=tuple(sorted({s.get('independence_key') or s.get('source', '') for s in software if s['product'] == item['product'] and s.get('port') == item.get('port') and s.get('normalization_status')}))))
         groups = {}
         for item in software:
             groups.setdefault((item.get('port'), item['product']), set()).update([item['version']] if item.get('version') else [])
@@ -78,7 +79,8 @@ class KnowledgeState:
                    {n: r for n, r in resolved.items() if r['state'] == 'CONTRADICTORY'},
                    tuple(sorted(goals, key=lambda g: g.goal_id)), endpoints, software,
                    tuple(assessment.potential_correlations), tuple(o.to_dict() for o in evidence.observations),
-                   tuple(dict(a) for a in evidence.attempts), budget.snapshot())
+                   tuple(dict(a) for a in evidence.attempts), budget.snapshot(),
+                   tuple({"check_id": c.check_id, "port": c.port} for c in assessment.checks if c.status.value == "COMPLETED"))
 
     def to_dict(self):
         from dataclasses import asdict

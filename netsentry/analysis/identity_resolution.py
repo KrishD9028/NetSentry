@@ -32,6 +32,11 @@ def collect_existing(assessment, scan, discovery=None):
             for scanned in root.findall("host"):
                 if not any(address.get("addr") == assessment.host for address in scanned.findall("address")):
                     continue
+                for osclass in scanned.findall("os/osmatch/osclass")[:8]:
+                    family = osclass.get("osfamily")
+                    if family:
+                        evidence.add(observation("reported_os_family", family, "Existing Nmap OS metadata (no new scan)",
+                                                 "initial_scan", "nmap_os", hypothesis=True))
                 for address in scanned.findall("address[@addrtype='mac']"):
                     if address.get("addr"):
                         evidence.add(observation("mac_address", address.get("addr"), "Nmap link-layer observation", "initial_scan", "local_discovery"))
@@ -69,7 +74,7 @@ def collect_existing(assessment, scan, discovery=None):
                 if attempt.get("certificate"):
                     for item in certificate_observations(attempt["certificate"], endpoint, "rdp_certificate"):
                         evidence.add(item)
-        for field in ("tls_version", "banner"):
+        for field in ("tls_version", "banner", "server"):
             if data.get(field):
                 evidence.add(observation("protocol_version" if field == "tls_version" else "software_banner",
                                          data[field], check.title, check.check_id, check.service or check.title, endpoint))
@@ -145,16 +150,12 @@ def enrich_identity(assessment, scan, resolver=None, discovery=None, vulnerabili
     if not evidence.resolve("mac_vendor")["value"] and evidence.resolve("mac_address")["state"] != "CONTRADICTORY":
         mac = evidence.resolve("mac_address")["value"]
         if mac:
-            try:
-                from scapy.config import conf
-                vendor = conf.manufdb._get_manuf(mac) if conf.manufdb is not None else mac
-                if vendor and vendor != mac and vendor != "Unknown":
-                    evidence.add(observation("mac_vendor", vendor, "Local Scapy OUI database; interface vendor is not OS identity",
-                                             "mac_vendor_lookup", "oui_database"))
-                evidence.attempts.append({"probe": "mac_vendor_lookup", "status": "COMPLETED" if vendor != mac else "INCONCLUSIVE",
-                                          "reason": "Local OUI lookup only; no network request.", "attributes": ["mac_vendor"]})
-            except (ImportError, OSError) as exc:
-                evidence.attempts.append({"probe": "mac_vendor_lookup", "status": "UNSUPPORTED", "reason": str(exc), "attributes": ["mac_vendor"]})
+            from .mac_vendor import lookup_vendor
+            result = lookup_vendor(mac)
+            if result.vendor:
+                evidence.add(observation("mac_vendor", result.vendor, result.reason, "mac_vendor_lookup", "oui_database"))
+            evidence.attempts.append({"probe": "mac_vendor_lookup", "status": result.status,
+                                      "reason": result.reason, "attributes": ["mac_vendor"]})
     for attribute in ATTRIBUTES:
         if not any(attribute in attempt.get("attributes", ()) for attempt in evidence.attempts) and evidence.resolve(attribute)["state"] == "UNRESOLVED":
             evidence.attempts.append({"probe": "planner", "kind": "unresolved_goal", "status": "UNSUPPORTED",
@@ -163,6 +164,25 @@ def enrich_identity(assessment, scan, resolver=None, discovery=None, vulnerabili
     software = list(assessment.software_evidence)
     correlations = list(assessment.potential_correlations)
     diagnostics = list(assessment.correlation_diagnostics)
+    acquired = tuple(getattr(resolver, "acquired_software", ()))
+    for item in acquired:
+        software.append({**asdict(item), "confidence": item.confidence.value})
+    from ..acquisition.integration import correlate_acquired
+    new_matches, new_diagnostics = correlate_acquired(acquired, software, vulnerability_provider)
+    conflicts = {(item.product.casefold(), item.port) for item in acquired if len({other.get("version") for other in software
+                 if other["product"].casefold() == item.product.casefold() and other.get("port") == item.port and other.get("version") is not None}) > 1}
+    retained = []
+    for candidate in correlations:
+        prior = candidate.get("evidence", {})
+        if (prior.get("product", "").casefold(), prior.get("port")) in conflicts:
+            diagnostics.append({"cve_id": candidate.get("cve_id"), "status": "INDETERMINATE",
+                                "reason": "New conflicting version evidence; prior automatic correlation withheld.",
+                                "prior_candidate": candidate})
+        else:
+            retained.append(candidate)
+    correlations = retained
+    correlations.extend(new_matches)
+    diagnostics.extend(new_diagnostics)
     # OS evidence is available for provider evaluation, but never fabricated
     # from SMB dialects. Retain all versions, withholding contradictory matches.
     versions = [item for item in evidence.observations if item.attribute == "os_version" and item.probe == "rdp_identity"]

@@ -1,5 +1,6 @@
 """Bounded feedback loop; evidence stays in the existing HostEvidence store."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from ..analysis.host_evidence import observation
 
 from .executor import execute
 from .knowledge import KnowledgeState
@@ -8,7 +9,7 @@ from .planner import DeterministicPlanner, candidates
 from .registry import identity_registry
 
 
-def run_planning(assessment, evidence, registry, *, planner=None, policy=None, budget=None):
+def run_planning(assessment, evidence, registry, *, planner=None, policy=None, budget=None, software_sink=None):
     planner = planner if planner is not None else DeterministicPlanner()
     policy = policy if policy is not None else Policy()
     budget = budget if budget is not None else Budget()
@@ -45,19 +46,31 @@ def run_planning(assessment, evidence, registry, *, planner=None, policy=None, b
         # does not trust a planner-mutated/stale knowledge snapshot.
         execution = execute(proposal, KnowledgeState.derive(assessment, evidence, budget), registry, policy, budget)
         step['policy_decision'] = 'ALLOWED' if execution.executed else 'REJECTED'
-        step['result'] = {'status': execution.status, 'reason': execution.reason, 'evidence_count': len(execution.observations)}
+        step['result'] = {'status': execution.status, 'reason': execution.reason, 'evidence_count': len(execution.observations), 'software_count': len(execution.software), 'accounting': execution.accounting}
         if not execution.executed:
             trace['stopping_reason'] = 'Executor rejected proposal: ' + execution.reason
             break
         previous = evidence.to_dict()['attributes']
         count = len(evidence.observations)
-        for observation in execution.observations:
-            evidence.add(observation)
+        for observed in execution.observations:
+            evidence.add(observed)
         action = registry.get(proposal.action_id)
         evidence.attempts.append({'probe': action.action_id, 'port': proposal.port,
                                   'endpoint': f'{assessment.host}:{proposal.port}/{action.transport}' if proposal.port is not None else None,
                                   'status': execution.status, 'reason': execution.reason,
                                   'attributes': list(action.produces), 'reused': False})
+        if execution.software:
+            additions = tuple({**asdict(item), 'confidence': item.confidence.value} for item in execution.software)
+            assessment = replace(assessment, software_evidence=assessment.software_evidence + additions)
+            for item in execution.software:
+                endpoint = f'{item.host}:{item.port}/tcp'
+                evidence.add(observation('software_product', item.product, item.source, item.action_id, item.independence_key, endpoint, limitations=item.limitations))
+                if item.version:
+                    evidence.add(observation('software_version', f'{item.product} {item.version}', item.source, item.action_id, item.independence_key, endpoint, limitations=item.limitations))
+            if software_sink is not None:
+                software_sink.extend(execution.software)
+        from ..acquisition.hypotheses import refresh_hypotheses
+        refresh_hypotheses(evidence)
         after = evidence.to_dict()['attributes']
         step['changes'] = [{'attribute': name, 'before': previous[name]['state'], 'after': result['state']}
                            for name, result in after.items() if any(result[key] != previous[name][key] for key in ('state', 'value', 'independent_confirmations'))]
@@ -77,11 +90,15 @@ class AdaptiveIdentityResolver:
         self.registry = registry if registry is not None else identity_registry(probes)
         self.planner, self.policy, self.limits = planner, policy, limits
         self.trace = None
+        self.acquired_software = []
 
     def resolve(self, assessment, evidence):
+        self.acquired_software = []
+        from ..acquisition.hypotheses import refresh_hypotheses
+        refresh_hypotheses(evidence)
         remaining = Budget(self.limits)
         self.trace = run_planning(assessment, evidence, self.registry, planner=self.planner,
-                                  policy=self.policy, budget=remaining)
+                                  policy=self.policy, budget=remaining, software_sink=self.acquired_software)
         for goal in KnowledgeState.derive(assessment, evidence, remaining).goals:
             if goal.state != 'UNRESOLVED' or any(goal.attribute in a.get('attributes', ()) for a in evidence.attempts):
                 continue

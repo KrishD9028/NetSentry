@@ -44,6 +44,10 @@ def candidates(knowledge, registry, policy, budget):
             # one-attempt-per-action/endpoint ceiling.
             if rejection is None and previous_attempt(action, port, knowledge):
                 rejection = 'Action/endpoint already attempted; repeat suppressed.'
+            if rejection is None and any(c['check_id'] in action.reuse_checks and c['port'] == port for c in knowledge.completed_checks):
+                rejection = 'Completed protocol evidence already collected; redundant acquisition suppressed.'
+            if rejection is None and any(s.get('source') in action.reuse_sources and s.get('port') == port for s in knowledge.software):
+                rejection = 'Equivalent software evidence already collected; redundant acquisition suppressed.'
             relevant = [g for g in knowledge.goals if g.attribute in action.produces and
                         (g.endpoint is None or g.endpoint == port)]
             useful = [g for g in relevant if not g.sources or set(action.sources_for(g.attribute)) - set(g.sources)]
@@ -52,11 +56,15 @@ def candidates(knowledge, registry, policy, budget):
             if rejection is None:
                 rejection = budget.rejection(action)
             gain = sum(g.importance * (2 if g.state == 'CONTRADICTORY' else 1) for g in useful)
+            discrimination = sum(g.importance for g in useful if g.attribute in action.discriminates and
+                                 (g.state == 'CONTRADICTORY' or (g.attribute in knowledge.probable and
+                                  any(o['hypothesis'] for o in knowledge.probable[g.attribute]['observations']))))
+            gain += discrimination
             penalty = action.cost + action.network_requests + action.noise + int(action.timeout)
             score = gain * action.information_value - penalty
             reason = (f"Goals: {', '.join(g.goal_id for g in useful) or 'none'}; "
                       f"independent evidence sources: {', '.join(action.sources)}; "
-                      f"information value {gain} × {action.information_value}, cost penalty {penalty}; "
+                      f"discrimination bonus {discrimination}; information value {gain} × {action.information_value}, cost penalty {penalty}; "
                       f"{action.safety.value}; " + (rejection or 'applicable, prerequisites satisfied, budget permits execution.'))
             if score <= 0 and rejection is None:
                 rejection = 'Expected information value does not outweigh declared cost.'

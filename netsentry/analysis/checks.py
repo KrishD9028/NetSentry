@@ -6,7 +6,7 @@ from dataclasses import asdict, replace
 
 from ..scanning.models import HostScanResult, PortService, ServiceIdentity, PORT_HINTS
 from .models import CheckStatus, Confidence, Finding, SecurityCheckResult, Severity
-from .probes import ProbeError, SMBProbeData, TLSProbeData, probe_smb, probe_tls
+from .probes import ProbeError, ProbeUnavailable, SMBProbeData, TLSProbeData, probe_smb, probe_tls
 from .service_probes import DNSProbeData, HTTPProbeData, RDPProbeData, SSHProbeData, probe_dns, probe_http, probe_rdp, probe_ssh
 
 
@@ -174,6 +174,8 @@ def identify_for_checks(checks, result: HostScanResult, service: PortService):
             service = replace(service, identities=identities)
             collected[check] = data
             attempts.append({"protocol": check.protocol_name, "status": "CONFIRMED", "source": identity.source})
+        except ProbeUnavailable as exc:
+            attempts.append({"protocol": check.protocol_name, "status": "UNAVAILABLE", "reason": str(exc)})
         except Exception as exc:
             attempts.append({"protocol": check.protocol_name, "status": "INCONCLUSIVE", "reason": str(exc)})
     return replace(service, identification_attempts=tuple(attempts)), collected
@@ -196,6 +198,8 @@ class SMBConfigurationCheck(ProtocolServiceCheck):
     def run(self, result: HostScanResult, service: PortService, *, data=None) -> SecurityCheckResult:
         try:
             data = data if data is not None else self.collect(result, service)
+        except ProbeUnavailable as exc:
+            return SecurityCheckResult(self.check_id, self.title, CheckStatus.UNAVAILABLE, service.port, service.protocol, service.confirmed_service, str(exc))
         except ProbeError as exc:
             return SecurityCheckResult(self.check_id, self.title, CheckStatus.FAILED, service.port, service.protocol, service.confirmed_service, str(exc))
 

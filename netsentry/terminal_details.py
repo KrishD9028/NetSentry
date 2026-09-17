@@ -241,6 +241,12 @@ def host_identity_details(identity):
             detail("Confirmed service stack", "HTTPS (HTTP over TLS)")
         else:
             detail(labels.get(item["attribute"], item["attribute"].replace("_", " ").capitalize()), item["value"])
+        if item.get("hypothesis"):
+            detail("Interpretation", "Hypothesis only; not independent OS confirmation")
+            for supporting in item.get("support", ()):
+                detail("Supporting evidence", supporting)
+            for contradiction in item.get("contradictions", ()):
+                detail("Conflicting candidate", contradiction)
         detail("Source", f"{text(item['source'])}; probe {text(item['probe'])}; endpoint {text(item['endpoint'])}")
     print("  Follow-up attempts:")
     for attempt in identity["attempts"]:
@@ -257,6 +263,7 @@ def host_identity_details(identity):
 def planning_details(trace):
     print('ENUMERATION PLANNING')
     detail('Planner', trace['planner'])
+    seen_rejections = set()
     for index, step in enumerate(trace['steps'], 1):
         selected = step['selected']
         if selected:
@@ -268,7 +275,9 @@ def planning_details(trace):
             for change in step['changes']:
                 detail('Knowledge change', f"{change['attribute']}: {change['before']} → {change['after']}")
         for candidate in step['candidates']:
-            if candidate['rejection']:
+            key = (candidate['proposal']['action_id'], candidate['proposal']['port'], candidate['rejection'])
+            if candidate['rejection'] and key not in seen_rejections:
+                seen_rejections.add(key)
                 detail('Not selected', f"{candidate['proposal']['action_id']}: {candidate['rejection']}")
     detail('Stopped', trace['stopping_reason'])
     detail('Actions remaining', trace['remaining_budget']['actions_remaining'])

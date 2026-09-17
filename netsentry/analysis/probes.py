@@ -39,6 +39,10 @@ class ProbeError(RuntimeError):
     """Raised when a safe network probe cannot complete."""
 
 
+class ProbeUnavailable(ProbeError):
+    """The requested protocol transport is not implemented."""
+
+
 @contextmanager
 def _quiet_smb_worker():
     # smbprotocol logs this worker exception and then re-raises it on the
@@ -59,6 +63,8 @@ def _quiet_smb_worker():
 @_quiet_smb_worker()
 def probe_smb(host: str, *, port: int = 445, timeout: float = 2.0, socket_factory=socket.create_connection) -> SMBProbeData:
     """Perform an unauthenticated SMB negotiate using smbprotocol."""
+    if port == 139:
+        raise ProbeUnavailable("SMB over TCP/139 is unsupported: NetBIOS session establishment is required; Direct TCP negotiation was not attempted.")
     logging.getLogger("smbprotocol").setLevel(logging.WARNING)
     logging.getLogger("smbprotocol.connection").setLevel(logging.WARNING)
     try:

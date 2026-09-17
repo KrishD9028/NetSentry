@@ -683,11 +683,88 @@ assessment fields remain intact. Actual elapsed-time values naturally differ acr
 runs. Verbose `ENUMERATION PLANNING` interprets the trace; compact output does not
 print it. Goals can remain unresolved when no useful permitted capability exists.
 
-This is a foundation, not a complete adaptive capability catalog. Current result
-adapters ingest host observations; future software/version, CPE, and CVE-investigation
-adapters must feed their canonical evidence pipelines rather than add a competing
-fact store. They are not implemented by merely registering a goal. Before adding
+This remains a bounded capability catalog. Acquisition adapters now ingest host
+observations and canonical SoftwareEvidence; see the acquisition milestone below.
+Future CPE and CVE-investigation adapters must use those canonical pipelines rather
+than add a competing fact store. Registering a goal does not implement its capability. Before adding
 an AI planner, live-test selection/deadlines, review capability costs and provenance
 contracts, implement needed evidence adapters, and validate an untrusted JSON proposal
 decoder plus adversarial policy-boundary tests. The executor and policy ceiling must
 remain outside the AI adapter's control.
+
+### Evidence acquisition and active fingerprinting
+
+The existing registry now includes `http_fingerprint`, `https_fingerprint`, and
+`ssh_fingerprint`. These are SAFE_ACTIVE capabilities with declared endpoints,
+outputs, source categories, prerequisites, costs, reuse constraints and discrimination
+metadata. Selection and validation stay in the generic planner/executor; main.py has
+no protocol-specific acquisition logic. Completed HTTP/SSH checks and equivalent
+software-source evidence suppress redundant acquisition.
+
+HTTP reads one response of at most 16 KiB from `GET /`, without redirects, crawling,
+credentials or arbitrary paths. HTTPS uses the same bounded HTTP parser over TLS,
+retaining handshake, cipher, subject, issuer and bounded SAN observations. A shared
+absolute deadline clamps connection, handshake, send and receive operations. A
+successful TLS observation survives a later HTTP failure. SSH reuses the existing
+bounded identification/KEXINIT probe and stops before authentication; a usable banner
+survives incomplete algorithm enumeration. No new SMB/RPC authentication exchange,
+aggressive OS scan, external callback or exploit validation was added.
+
+`AcquisitionResult` extends the existing identity-probe result with a tuple of
+`SoftwareEvidence` and optional logical-request accounting. It is not another software
+model. Canonical software evidence has additive action ID, raw value, normalization
+status, independence key and limitations fields alongside existing vendor, product,
+version, variant, protocol and endpoint fields. Exact product names are retained;
+there are no fuzzy aliases. Ambiguous version strings keep `raw_version` and yield
+`version: null`. Product vendors describe the software project, not a proven downstream
+package vendor. No CPE is manufactured from these observations.
+
+The executor validates bounded text fields, endpoint/action provenance, registered
+source categories, result sizes and declared request allowances before ingestion.
+Validated software updates the planning view, so an acquired version can resolve a
+version goal and stop further acquisition. At enrichment completion it enters the
+existing version-aware provider and fresh POTENTIAL binding. Conflicting versions
+withhold automatic matches; a superseded candidate is preserved in diagnostics with
+the original observations. None of this creates security findings or risk scores.
+Acquisition does not rerun security checks or rewrite the initial port-state snapshot;
+new service demonstrations remain available in host evidence and planner knowledge.
+
+OS hypotheses reuse HostObservation with `hypothesis: true`, explicit supporting
+records, contradictory candidates, confidence and limitations. Existing Nmap OS
+metadata, explicit SSH OS-flavored banners, and exact Microsoft-IIS headers may supply
+reported clues. SMB dialect + NetBIOS name + RPC interface evidence supports only a
+Windows-compatible hypothesis. RPC annotations, GUIDs, port numbers, generic software
+names and protocol versions never establish Windows edition/build or patch state.
+All derived hypotheses contribute zero independent confirmations. Genuine conflicting
+observations remain retained. The planner awards a transparent discrimination bonus
+to eligible capabilities offering a new source for an unresolved OS hypothesis or
+conflict; repeating the same correlated source earns no bonus.
+
+TCP/139 is explicitly UNAVAILABLE for SMB negotiation. The installed `smbprotocol`
+transport implements Direct TCP, while 139 requires NetBIOS session establishment.
+NetSentry rejects this unsupported transport before opening a connection rather than
+sending an invalid Direct TCP negotiate. TCP/445 security assessment is unchanged.
+See Microsoft's [SMB transport documentation](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb/f906c680-330c-43ae-9a71-f854e24aeee6)
+and [Direct SMB hosting overview](https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/direct-hosting-of-smb-over-tcpip).
+
+Discovery and identity enrichment share a local MAC/OUI lookup. Colon, hyphen,
+compact and dotted forms normalize to lowercase colon-separated MACs. Malformed,
+multicast, unspecified and locally administered addresses do not produce manufacturer
+claims. Missing local prefixes are distinguished from unavailable databases. The
+installed Scapy database in this development environment resolves a known Cisco OUI
+but has no entry for `c4:ff:99`; the supplied MAC remains unresolved locally. No lookup
+service, dataset download, or runtime network dependency was added. Database versions
+on other installations may differ. An interface manufacturer never proves an OS.
+
+Budgets still reserve the full declared allowance before execution. HTTP reserves one
+logical exchange, HTTPS two, SSH two; these are exchanges, not literal packets.
+Acquisition results report attempted logical units where available, elapsed execution
+time and the supplied timeout. Existing adapters may report unknown actual units;
+there is no fabricated packet count or refund for failures. All existing action-count,
+wall-clock, repetition, safety and authentication gates remain enforced.
+
+JSON retains the complete planning history and additive evidence/accounting fields.
+Verbose output deduplicates identical action/endpoint/rejection messages while keeping
+changed reasons, selections and results. Compact output remains concise. There is no
+LLM integration. OS family/build can still remain unresolved on a host exposing only
+SMB/NetBIOS/RPC: this milestone does not manufacture facts to close a capability gap.

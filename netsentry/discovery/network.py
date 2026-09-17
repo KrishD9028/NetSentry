@@ -123,26 +123,11 @@ def _hostname_for(ip: str) -> str | None:
 
 
 def _vendor_for(mac: str) -> str | None:
-    locally_administered = _is_locally_administered_mac(mac)
-    normalized_mac = mac.lower().replace("-", ":")
-    try:
-        from scapy.config import conf
-
-        lookup_result = conf.manufdb.lookup(mac)
-    except Exception:
-        lookup_result = None
-
-    candidates = lookup_result if isinstance(lookup_result, (tuple, list)) else (lookup_result,)
-    vendor_names = [
-        value.strip()
-        for value in candidates
-        if isinstance(value, str)
-        and value.strip()
-        and value.strip().lower().replace("-", ":") != normalized_mac
-    ]
-    if vendor_names:
-        return vendor_names[-1]
-    if locally_administered:
+    from ..analysis.mac_vendor import lookup_vendor
+    result = lookup_vendor(mac)
+    if result.vendor:
+        return result.vendor
+    if result.mac and int(result.mac[:2], 16) & 2:
         return "Unknown (Private/Randomized MAC)"
     return "Unknown"
 

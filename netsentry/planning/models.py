@@ -125,6 +125,9 @@ class ActionDefinition:
     safety: SafetyClass = SafetyClass.SAFE_ACTIVE
     authentication_required: bool = False
     repeatable: bool = False
+    discriminates: tuple[str, ...] = ()
+    reuse_checks: tuple[str, ...] = ()
+    reuse_sources: tuple[str, ...] = ()
     source_outputs: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def sources_for(self, attribute):

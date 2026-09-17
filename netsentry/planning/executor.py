@@ -1,5 +1,7 @@
 """Mandatory executor boundary: recompute eligibility, then invoke trusted code."""
 from dataclasses import dataclass
+import time
+from ..analysis.correlation import SoftwareEvidence
 
 from ..analysis.host_evidence import HostObservation, IdentityProbeResult
 from ..analysis.models import Confidence
@@ -14,6 +16,8 @@ class Execution:
     reason: str
     observations: tuple[HostObservation, ...] = ()
     executed: bool = False
+    software: tuple[SoftwareEvidence, ...] = ()
+    accounting: dict | None = None
 
 
 def execute(proposal, knowledge, registry, policy, budget):
@@ -33,10 +37,11 @@ def execute(proposal, knowledge, registry, policy, budget):
     timeout = budget.reserve(action)
     if timeout <= 0:
         return Execution('REJECTED', 'Deadline expired before execution.')
+    started = time.monotonic()
     try:
         result = action.handler(ActionContext(knowledge.host, proposal.port, timeout))
     except (OSError, ProbeError) as exc:
-        return Execution('FAILED', str(exc), executed=True)
+        return Execution('FAILED', str(exc), executed=True, accounting={'logical_units_reserved': action.network_requests, 'logical_units_reported': None, 'elapsed_seconds': max(0, time.monotonic() - started), 'timeout_seconds': timeout})
     if not isinstance(result, IdentityProbeResult) or result.status not in {'COMPLETED', 'FAILED', 'INCONCLUSIVE', 'UNSUPPORTED', 'UNAVAILABLE'} or not isinstance(result.reason, str):
         return Execution('INVALID_RESULT', 'Handler returned an invalid structured result.', executed=True)
     if not isinstance(result.observations, tuple) or len(result.observations) > 128:
@@ -49,4 +54,28 @@ def execute(proposal, knowledge, registry, policy, budget):
                 item.probe != action.action_id or item.endpoint != expected_endpoint or
                 (action.safety == SafetyClass.SAFE_ACTIVE and item.authoritative)):
             return Execution('INVALID_RESULT', 'Evidence violates the registered output/source contract.', executed=True)
-    return Execution(result.status, result.reason, result.observations, True)
+    software = getattr(result, 'software', ())
+    if not isinstance(software, tuple) or len(software) > 64:
+        return Execution('INVALID_RESULT', 'Software evidence exceeds contract bounds.', executed=True)
+    for item in software:
+        if isinstance(item, SoftwareEvidence):
+            string_fields = ('product', 'version', 'protocol', 'source', 'vendor', 'variant', 'raw_version', 'host',
+                             'action_id', 'raw_value', 'normalization_status', 'limitations', 'independence_key')
+            if any(getattr(item, name) is not None and (not isinstance(getattr(item, name), str) or
+                   len(getattr(item, name)) > (16384 if name == 'raw_value' else 2048)) for name in string_fields):
+                return Execution('INVALID_RESULT', 'Software fields must contain bounded text.', executed=True)
+        if (not isinstance(item, SoftwareEvidence) or 'software_product' not in action.produces or
+                item.host != knowledge.host or item.port != proposal.port or item.action_id != action.action_id or
+                item.independence_key not in action.sources_for('software_product') or
+                not isinstance(item.confidence, Confidence) or not isinstance(item.product, str) or not item.product or
+                len(item.product) > 256 or item.normalization_status not in {'VERSION_OBSERVED', 'INDETERMINATE'} or
+                not isinstance(item.source, str) or not item.source or not isinstance(item.limitations, str) or
+                (item.version is not None and (not isinstance(item.version, str) or len(item.version) > 256)) or
+                (item.raw_value is not None and (not isinstance(item.raw_value, str) or len(item.raw_value) > 16384))):
+            return Execution('INVALID_RESULT', 'Software provenance or normalization contract is invalid.', executed=True)
+    reported = getattr(result, 'logical_requests', None)
+    if reported is not None and (type(reported) is not int or not 0 <= reported <= action.network_requests):
+        return Execution('INVALID_RESULT', 'Reported requests exceed the reserved capability allowance.', executed=True)
+    return Execution(result.status, result.reason, result.observations, True, software,
+                     {'logical_units_reserved': action.network_requests, 'logical_units_reported': reported,
+                      'elapsed_seconds': max(0, time.monotonic() - started), 'timeout_seconds': timeout})

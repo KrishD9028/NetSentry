@@ -22,6 +22,11 @@ class SoftwareEvidence:
     raw_version: str | None = None
     host: str | None = None
     port: int | None = None
+    action_id: str | None = None
+    raw_value: str | None = None
+    normalization_status: str | None = None
+    limitations: str | None = None
+    independence_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

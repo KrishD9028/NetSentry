@@ -29,6 +29,9 @@ class HostObservation:
     observed_at: str | None = None
     authoritative: bool = False
     hypothesis: bool = False
+    support: tuple[str, ...] = ()
+    contradictions: tuple[str, ...] = ()
+    limitations: str | None = None
 
     def to_dict(self):
         return {**asdict(self), "confidence": self.confidence.value}

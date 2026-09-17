@@ -23,9 +23,11 @@ class ActionRegistry:
                 raise ValueError('Action costs/values must be nonnegative integers')
         if not math.isfinite(action.timeout) or action.timeout <= 0:
             raise ValueError('Action timeout must be positive and finite')
-        for values in (action.produces, action.sources, action.services, action.prerequisites):
+        for values in (action.produces, action.sources, action.services, action.prerequisites, action.discriminates, action.reuse_checks, action.reuse_sources):
             if not isinstance(values, tuple) or any(not isinstance(value, str) or not value or len(value) > 128 for value in values):
                 raise ValueError('Action requirements and evidence declarations must be bounded string tuples')
+        if not set(action.discriminates) <= set(action.produces):
+            raise ValueError('Discrimination metadata must name declared evidence outputs')
         if type(action.authentication_required) is not bool or type(action.repeatable) is not bool:
             raise ValueError('Action policy flags must be booleans')
         if len({name for name, _ in action.source_outputs}) != len(action.source_outputs):
@@ -73,7 +75,7 @@ def identity_registry(probes=None):
             return None
         return lambda context: probe(context.host, port=context.port, timeout=context.timeout)
 
-    return ActionRegistry((
+    registry = ActionRegistry((
         ActionDefinition('netbios_identity', 'Read one IPv4 NetBIOS node-status response.', 'host_identity',
                          ('hostname', 'netbios_name', 'workgroup', 'mac_address'), ('netbios',), handler('netbios_identity'),
                          services=('smb', 'microsoft-ds', 'netbios-ssn'), fallback_ports=(139, 445),
@@ -93,3 +95,6 @@ def identity_registry(probes=None):
                          services=('msrpc',), fallback_ports=(135,), information_value=2,
                          cost=3, network_requests=3, noise=2),
     ))
+    from ..acquisition.registry import register_acquisition
+    register_acquisition(registry)
+    return registry

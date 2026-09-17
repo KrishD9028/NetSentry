@@ -103,7 +103,7 @@ def test_nonopen_endpoints_never_satisfy_network_applicability(state):
 def test_registry_reuses_probes_and_keeps_protocol_aware_applicability():
     target = assessment(port(111, 'open', hint='rpcbind'), port(3389, 'open', service='http'), port(445, 'open', service='smb'))
     eligible = [c.proposal.action_id for c in candidates(knowledge(target), identity_registry(), Policy(), budget()) if not c.rejection]
-    assert eligible == ['netbios_identity']
+    assert eligible == ['http_fingerprint', 'netbios_identity']  # Confirmed HTTP on a nonstandard port is applicable.
 
 
 @pytest.mark.parametrize('safety', [SafetyClass.AUTHENTICATED, SafetyClass.INTRUSIVE, SafetyClass.EXPLOITATIVE])
