@@ -15,8 +15,8 @@ class AssessmentCliTests(unittest.TestCase):
     @patch("netsentry.main.discover_devices")
     @patch("netsentry.main.get_local_network")
     def test_discover_replaces_current_snapshot(self, mock_network, mock_discover, mock_save) -> None:
-        mock_network.return_value = NetworkTarget("en0", "100.100.201.2", IPv4Network("100.100.201.0/24"))
-        devices = [Device("100.100.201.201", None, None, "Unknown")]
+        mock_network.return_value = NetworkTarget("en0", "192.0.2.2", IPv4Network("192.0.2.0/24"))
+        devices = [Device("192.0.2.201", None, None, "Unknown")]
         mock_discover.return_value = devices
         args = _build_parser().parse_args(["discover", "--interface", "en0"])
         with redirect_stdout(StringIO()):
@@ -28,12 +28,12 @@ class AssessmentCliTests(unittest.TestCase):
     @patch("netsentry.main.load_current_snapshot")
     @patch("netsentry.main.scan_target")
     def test_discovered_scan_uses_only_current_snapshot(self, mock_scan, mock_snapshot, mock_discover) -> None:
-        mock_snapshot.return_value = [Device("100.100.201.201", None, None, "Unknown")]
+        mock_snapshot.return_value = [Device("192.0.2.201", None, None, "Unknown")]
         args = _build_parser().parse_args(["scan", "--discovered", "--profile", "common"])
         with redirect_stdout(StringIO()):
             _run_scan(args)
         mock_scan.assert_called_once()
-        self.assertEqual(mock_scan.call_args.args[0], "100.100.201.201")
+        self.assertEqual(mock_scan.call_args.args[0], "192.0.2.201")
         mock_discover.assert_not_called()
 
     def test_assess_help_parser_accepts_json(self) -> None:

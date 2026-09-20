@@ -176,7 +176,7 @@ class SecurityRuleTests(unittest.TestCase):
 class AssessmentSerializationTests(unittest.TestCase):
     def test_smb_probe_success_reports_signing_and_dialect(self) -> None:
         check = SMBConfigurationCheck(lambda host, port: SMBProbeData("SMB 3.1.1", False, True, False, "WORKGROUP", "Not required for protocol negotiation"))
-        result = check.run(HostScanResult(target="100.100.201.201"), service(445, "microsoft-ds"))
+        result = check.run(HostScanResult(target="192.0.2.1"), service(445, "microsoft-ds"))
         self.assertEqual(result.status, CheckStatus.COMPLETED)
         self.assertEqual(result.details["dialect"], "SMB 3.1.1")
         self.assertEqual(result.details["signing_required"], False)
@@ -187,7 +187,7 @@ class AssessmentSerializationTests(unittest.TestCase):
         output = StringIO()
         with redirect_stdout(output):
             _print_assessment(assess_scan_result(
-                HostScanResult(target="100.100.201.201", services=[service(445, "smb")], scan_profile="full"),
+                HostScanResult(target="192.0.2.1", services=[service(445, "smb")], scan_profile="full"),
                 checks=[check],
             ))
         self.assertIn("SMB 3.1.1, signing not required", output.getvalue())
@@ -196,7 +196,7 @@ class AssessmentSerializationTests(unittest.TestCase):
 
     def test_smb_signing_required_and_smbv1_disabled_have_no_findings(self) -> None:
         check = SMBConfigurationCheck(lambda host, port: SMBProbeData("SMB 3.1.1", False, True, True, "server", "Not required for protocol negotiation"))
-        result = check.run(HostScanResult(target="100.100.201.201"), service(445, "smb"))
+        result = check.run(HostScanResult(target="192.0.2.1"), service(445, "smb"))
         self.assertEqual(result.status, CheckStatus.COMPLETED)
         self.assertEqual(result.findings, ())
         self.assertFalse(result.details["smb1_supported"])
@@ -207,14 +207,14 @@ class AssessmentSerializationTests(unittest.TestCase):
             raise ProbeError("SMB probe failed")
 
         result = SMBConfigurationCheck(failing_probe).run(
-            HostScanResult(target="100.100.201.201"), service(445, "smb")
+            HostScanResult(target="192.0.2.1"), service(445, "smb")
         )
         self.assertEqual(result.status, CheckStatus.FAILED)
 
     def test_tls_probe_success_and_certificate_findings(self) -> None:
         valid = TLSProbeData("TLSv1.3", "TLS_AES_256_GCM_SHA384", "service.local", "Test CA", "Jan 01 00:00:00 2025 GMT", "Jan 01 00:00:00 2099 GMT", False, False, 200, {"strict-transport-security": "max-age=1"}, "not performed (certificate verification disabled for observation)")
         result = TLSConfigurationCheck(lambda host, port: valid).run(
-            HostScanResult(target="100.100.201.202"), service(8443, "https-alt")
+            HostScanResult(target="192.0.2.2"), service(8443, "https-alt")
         )
         self.assertEqual(result.status, CheckStatus.COMPLETED)
         self.assertEqual(result.details["tls_version"], "TLSv1.3")
@@ -234,7 +234,7 @@ class AssessmentSerializationTests(unittest.TestCase):
         connection.dialect = 0x0311
         connection.server_security_mode = 3
         connection.server_guid = "server-guid"
-        data = probe_smb("100.100.201.201")
+        data = probe_smb("192.0.2.1")
         self.assertEqual(data.dialect, "SMB 3.1.1")
         mock_get_logger.assert_any_call("smbprotocol")
         self.assertTrue(mock_get_logger.return_value.setLevel.called)
@@ -243,7 +243,7 @@ class AssessmentSerializationTests(unittest.TestCase):
         check = SMBConfigurationCheck(lambda host, port: SMBProbeData("SMB 3.1.1", False, True, True))
         assessment = assess_scan_result(
             HostScanResult(
-                target="100.100.201.201",
+                target="192.0.2.1",
                 services=[service(445, "smb"), service(135, "msrpc")],
                 scan_profile="full",
             ),
@@ -256,7 +256,7 @@ class AssessmentSerializationTests(unittest.TestCase):
     def test_expired_tls_certificate_is_reported(self) -> None:
         expired = TLSProbeData("TLSv1.2", "AES256", "old.local", "Old CA", "Jan 01 00:00:00 2020 GMT", "Jan 01 00:00:00 2021 GMT", True, False)
         result = TLSConfigurationCheck(lambda host, port: expired).run(
-            HostScanResult(target="100.100.201.202"), service(443, "https")
+            HostScanResult(target="192.0.2.2"), service(443, "https")
         )
         self.assertEqual(result.status, CheckStatus.COMPLETED)
         self.assertEqual(result.findings[0].title, "Expired TLS certificate")
@@ -266,7 +266,7 @@ class AssessmentSerializationTests(unittest.TestCase):
             raise ProbeError("TLS handshake failed: server does not speak TLS")
 
         result = TLSConfigurationCheck(non_tls_probe).run(
-            HostScanResult(target="100.100.201.202"), service(8443, "https-alt")
+            HostScanResult(target="192.0.2.2"), service(8443, "https-alt")
         )
         self.assertEqual(result.status, CheckStatus.INCONCLUSIVE)
 
@@ -275,7 +275,7 @@ class AssessmentSerializationTests(unittest.TestCase):
             raise ProbeError("connection refused")
 
         result = TLSConfigurationCheck(failed_tls_probe).run(
-            HostScanResult(target="100.100.201.202"), service(8443, "https-alt")
+            HostScanResult(target="192.0.2.2"), service(8443, "https-alt")
         )
         self.assertEqual(result.status, CheckStatus.FAILED)
 

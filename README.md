@@ -1,25 +1,72 @@
 # NetSentry
 
-NetSentry is an authorized network security assessment tool. It discovers local devices, enumerates TCP services, and produces non-exploitative security analysis from observable evidence.
+[![Tests](https://github.com/KrishD9028/NetSentry/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/KrishD9028/NetSentry/actions/workflows/tests.yml)
 
-## Authorization and limitations
+NetSentry is an evidence-driven network security assessment and enumeration framework.
 
-Only assess systems and networks you own or have explicit permission to test. NetSentry does not exploit vulnerabilities, execute payloads, brute-force credentials, authenticate to services, modify remote systems, or download exploit code.
+It discovers hosts, enumerates services, performs bounded protocol-specific security
+checks, gathers additional evidence adaptively, and resolves host and service identity.
+It can correlate observed software with potential CVEs, while explicitly separating
+confirmed observations, hypotheses, limitations, and unknowns.
 
-An open port is an attack-surface observation, not proof of a vulnerability. A security finding is emitted only by a completed security check with supporting evidence. If checks are unavailable or fail, NetSentry reports `LIMITED` and `Risk: UNKNOWN` rather than claiming the host is clean.
+## Key Features
 
-## Setup
+- Local IPv4 host discovery with address, MAC, hostname, and best-effort vendor evidence.
+- Profile-based TCP service enumeration through Nmap, with raw and normalized state evidence.
+- Bounded, non-exploitative checks for SMB, TLS, SSH, HTTP, DNS, and RDP.
+- Deterministic adaptive evidence acquisition under explicit time, action, and request budgets.
+- Conservative host and service identity resolution with provenance and conflict handling.
+- Offline, version-aware potential CVE correlation that never becomes a confirmed finding
+  or changes risk without direct evidence.
+- Human-readable compact and verbose reports plus structured JSON for automation.
+- Explicit assessment status, coverage, observed risk, confidence, limitations, and unknowns.
+
+## Example Assessment
 
 ```sh
-cd ~/NetSentry
+netsentry assess 192.0.2.20 --profile common --verbose
+netsentry assess 192.0.2.20 --profile common --json
+```
+
+Example output is intentionally not presented as a live measurement. NetSentry keeps
+potential CVE correlations separate from confirmed findings and reports incomplete
+checks as limited or unknown.
+
+<!-- TODO(public-release): Add a sanitized terminal screenshot from an authorized lab. -->
+
+## Architecture
+
+```text
+Discovery -> Nmap enumeration -> port-state evidence -> bounded protocol identification
+          -> adaptive evidence acquisition and identity resolution
+          -> service-aware defensive checks -> findings -> risk
+          -> potential CVE correlation (reported separately)
+```
+
+The implementation separates discovery, scanning, analysis, deterministic planning,
+and acquisition into independently testable packages. Registered capabilities are
+bounded by policy; service hints guide probes but do not establish identity, and an
+open port alone is not treated as a vulnerability.
+
+## Installation
+
+NetSentry requires Python 3.11 or newer. Create a virtual environment and install the
+project and its declared dependencies from the existing `pyproject.toml` configuration:
+
+```sh
+git clone https://github.com/KrishD9028/NetSentry.git
+cd NetSentry
 python3 -m venv .venv
 . .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-Scapy is used for local ARP discovery. Service scanning and assessment require the system-installed `nmap` binary. NetSentry checks for Nmap and does not install it automatically.
+Scapy is used for local ARP discovery. Service scanning and assessment require the
+system-installed `nmap` binary. NetSentry checks for Nmap and does not install it.
+On Debian or Ubuntu, install it with `sudo apt-get install nmap`.
 
-## Commands
+## Usage
 
 Show help:
 
@@ -35,7 +82,7 @@ Discover devices:
 ```sh
 netsentry discover
 netsentry discover --interface en0
-netsentry discover --network 192.168.1.0/24
+netsentry discover --network 192.0.2.0/24
 netsentry discover --timeout 5
 ```
 
@@ -46,11 +93,11 @@ Each successful `discover` run atomically replaces `~/.netsentry/current_discove
 Scan one authorized host:
 
 ```sh
-netsentry scan 192.168.1.20
-netsentry scan 192.168.1.20 --profile quick
-netsentry scan 192.168.1.20 --profile common
-netsentry scan 192.168.1.20 --profile custom --ports 22,80,443,8000-8100
-netsentry scan 192.168.1.20 --profile full --ports 1-65535
+netsentry scan 192.0.2.20
+netsentry scan 192.0.2.20 --profile quick
+netsentry scan 192.0.2.20 --profile common
+netsentry scan 192.0.2.20 --profile custom --ports 22,80,443,8000-8100
+netsentry scan 192.0.2.20 --profile full --ports 1-65535
 ```
 
 Scan discovered devices:
@@ -65,8 +112,8 @@ Without `--limit`, all discovered devices are scanned. If a scan profile reports
 Assess one host:
 
 ```sh
-netsentry assess 192.168.1.20 --profile common
-netsentry assess 192.168.1.20 --profile custom --ports 53,135,139,445,8443
+netsentry assess 192.0.2.20 --profile common
+netsentry assess 192.0.2.20 --profile custom --ports 53,135,139,445,8443
 ```
 
 Assess discovered devices:
@@ -79,13 +126,33 @@ netsentry assess --discovered --interface en0 --limit 10 --profile common
 Emit structured JSON:
 
 ```sh
-netsentry assess 192.168.1.20 --profile common --json
+netsentry assess 192.0.2.20 --profile common --json
 netsentry assess --discovered --limit 10 --profile common --json
 ```
 
 Assessment JSON preserves the host classification, scan profile, requested ports, reachability, probe status, port-state and service-identity evidence, security-check results, coverage, findings, and risk. Original XML and grouped port summaries are retained in `scan_evidence`.
 
-## Assessment states
+## Testing
+
+The test suite uses Python's standard-library test runner, so the editable installation
+above supplies all declared runtime and test requirements:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+Tests use constructed scan results and mocked discovery and subprocess boundaries.
+They do not scan random Internet hosts.
+
+## Evidence and Confidence Model
+
+An open port is an attack-surface observation, not proof of a vulnerability. A security
+finding is emitted only by a completed security check with supporting evidence. If
+checks are unavailable or fail, NetSentry reports `LIMITED` and `Risk: UNKNOWN` rather
+than claiming the host is clean. Potential CVE correlations remain potential until
+their applicability is independently established.
+
+### Assessment states
 
 - `COMPLETE`: all applicable checks for the available evidence completed.
 - `LIMITED`: checks were unavailable or failed, or the scan profile found no ports without proving the host has none.
@@ -94,7 +161,7 @@ Assessment JSON preserves the host classification, scan profile, requested ports
 
 `Overall Risk: UNKNOWN` is used for limited assessments. The legacy overall `0/10` result is reserved for completed assessments with no findings. Observed risk is reported separately and is scoped to assessed evidence; see below.
 
-## Analysis architecture
+### Analysis details
 
 The pipeline is:
 
@@ -107,7 +174,7 @@ The analysis package uses independently testable checks for SMB, TLS, SSH, HTTP,
 
 Future service/version normalization, CPE matching, CVE intelligence, and CVSS data can feed the same structured finding model without coupling those concerns to the scanner.
 
-## Risk scoring
+### Risk scoring
 
 Finding scores are transparent:
 
@@ -121,16 +188,7 @@ CRITICAL 10
 
 The host score is the highest score among confirmed findings. Informational observations do not inflate risk. A finding represents something supported by a completed check and deserves review; it does not prove exploitability.
 
-## Testing
-
-```sh
-. .venv/bin/activate
-python -m unittest discover -s tests -v
-```
-
-Tests use constructed scan results and mocked discovery/subprocess boundaries. They do not scan random Internet hosts.
-
-## Milestone 4 capabilities
+### Protocol-check capabilities
 
 The assessment layer also includes safe, modular checks for:
 
@@ -144,7 +202,7 @@ Services without a registered module remain attack-surface observations. Their p
 
 Software evidence can be passed to provider-based potential vulnerability correlation. Correlations are reported as `POTENTIAL` and never promoted to confirmed findings or risk without direct evidence.
 
-## TCP state and service evidence
+### TCP state and service evidence
 
 TCP scanning still uses Nmap `-sT -Pn` with the existing profile ports, timing,
 process timeout, and host timeout. This change does not enable `-sV` or NSE scripts.
@@ -215,12 +273,12 @@ PORT        STATE     SERVICE
 8443/tcp    open      https
 ```
 
-For the owner's Windows test host, compare:
+For an authorized test host, compare:
 
 ```sh
-netsentry scan 100.100.201.201 --profile common
-netsentry assess 100.100.201.201 --profile common
-netsentry assess 100.100.201.201 --profile common --json
+netsentry scan 192.0.2.201 --profile common
+netsentry assess 192.0.2.201 --profile common
+netsentry assess 192.0.2.201 --profile common --json
 ```
 
 TCP/22 should remain visible. A no-response result should show `unknown`, preserve
@@ -228,7 +286,7 @@ Nmap's raw `filtered/no-response` evidence in JSON, and cause no SSH security ch
 After connectivity is restored, an SSH identification banner should permit the
 SSH check. SMB on 445 and demonstrated TLS/HTTP on 8443 should continue working.
 
-## Observed risk and coverage
+### Observed risk and coverage
 
 Overall `risk` remains conservative and backward compatible: non-`COMPLETE`
 assessments retain `UNKNOWN` severity and a null score. A separate
@@ -268,7 +326,7 @@ status, and overall risk together. This is an ordering change; strict JSON
 consumers must also accommodate the added fields. Unknown ranking position is
 not an assertion of lower actual risk.
 
-## Milestone 4: SSH algorithms, RDP negotiation, and version ranges
+### SSH algorithms, RDP negotiation, and version ranges
 
 SSH banner identity and security enumeration are independent facts. The SSH
 check exchanges identification and KEXINIT messages only after a valid SSH banner
@@ -313,7 +371,7 @@ one second for the unhinted SSH fallback). SSH is capped at a 4 KiB banner read,
 lists/names. RDP frames are capped at 4 KiB. A slow response can legitimately
 remain inconclusive rather than trigger unbounded retries.
 
-### Offline affected-version definitions
+#### Offline affected-version definitions
 
 `StaticVulnerabilityProvider` now accepts `VulnerabilityDefinition` records rather
 than preconstructed correlation results. Each definition supplies product,
@@ -358,7 +416,7 @@ CVE dataset is bundled; providers remain explicitly injected by callers.
 Existing port-state, dispatch, endpoint-count, and risk semantics are preserved.
 No new dependency or global Nmap version-detection flag is introduced.
 
-### Assessment terminal modes
+#### Assessment terminal modes
 
 `netsentry assess TARGET` now defaults to a compact scanner-oriented report.
 Use `-v` or `--verbose` for interpreted analyst details, including scanner-reported
@@ -381,7 +439,7 @@ interface: `--json` retains its schema and semantics and takes precedence over
 `--verbose`. Rendering does not alter assessment evidence. The `scan` and
 `discover` terminal formats are unchanged.
 
-### Bundled real CVE correlations (Milestone 4)
+#### Bundled real CVE correlations
 
 Normal `netsentry assess TARGET --profile common` and `--discovered` assessments
 load a small offline dataset automatically. Library callers still choose their
@@ -420,7 +478,7 @@ bundled data fails assessment visibly before scanning; it is never replaced
 with an empty provider. JSON correlations add a `limitations` field when supplied;
 existing fields and risk semantics are preserved.
 
-### DNS recursion evidence
+#### DNS recursion evidence
 
 DNS `recursion_available` is retained for compatibility and means **recursion
 advertised** (RA), not demonstrated. The current bounded probe queries
@@ -435,7 +493,7 @@ open-recursion finding and make no risk contribution. A DNS-only assessment can
 therefore have UNKNOWN observed risk because no security check completed.
 Controlled recursion and client-access-policy validation are deferred.
 
-### Milestone 5: risk and actionable remediation
+### Risk and actionable remediation
 
 The centralized policy in `analysis/risk.py` preserves severity scores:
 INFO **0**, LOW **2**, MEDIUM **5**, HIGH **8**, CRITICAL **10**. Observed risk is
@@ -768,3 +826,48 @@ Verbose output deduplicates identical action/endpoint/rejection messages while k
 changed reasons, selections and results. Compact output remains concise. There is no
 LLM integration. OS family/build can still remain unresolved on a host exposing only
 SMB/NetBIOS/RPC: this milestone does not manufacture facts to close a capability gap.
+
+## Current Limitations
+
+- NetSentry requires a local Nmap installation for scanning and assessment.
+- Active identification is limited to registered bounded probes; it is not universal
+  service detection, and ambiguous or failed evidence remains inconclusive.
+- The bundled offline CVE dataset is intentionally small. Correlations are potential,
+  version-based leads and do not prove applicability, exploitability, or patch state.
+- DNS probing does not demonstrate open recursion, and the scanner cannot establish
+  Internet reachability or business importance by itself.
+- Identity evidence may remain probable, unresolved, or contradictory. Protocol and
+  banner clues do not establish an operating-system edition or patch state.
+- NetSentry does not exploit vulnerabilities, execute payloads, attack credentials,
+  crack Wi-Fi, establish persistence, evade defenses, or modify remote systems.
+
+## Roadmap
+
+Future work may expand reviewed evidence adapters, protocol coverage, identity
+resolution, vulnerability intelligence, and planner integrations. Any such work must
+preserve the existing provenance, bounded-execution, policy, and conservative
+correlation model. Roadmap items are not current capabilities.
+
+## Authorized Use
+
+NetSentry is intended for systems owned by the operator, systems for which the
+operator has explicit authorization to test, and legitimate security research or
+defensive assessment conducted within an approved scope. Operators are responsible
+for understanding the environment, obtaining permission, and respecting applicable
+policies and law.
+
+## License
+
+No license file is currently included. Until the project owner selects and adds a
+license, the repository's source remains subject to the default protections of
+copyright law; public visibility alone does not grant reuse rights.
+
+For a permissive open-source release, common choices include:
+
+- **MIT:** a short permissive license allowing use, modification, and redistribution
+  with preservation of the copyright and license notice and a warranty disclaimer.
+- **Apache License 2.0:** similarly permissive, with an explicit patent license,
+  patent-termination terms, and notice requirements.
+
+The project owner should choose the license that matches the intended contribution,
+redistribution, and patent policy before the public release.

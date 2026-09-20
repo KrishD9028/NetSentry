@@ -109,7 +109,7 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertEqual(remediation_priority(replace(item, service_importance_evidence="Operator inventory")).value, "HIGH")
 
     def test_ip_class_never_implies_exposure(self):
-        for address in ("8.8.8.8", "192.168.1.1", "100.100.201.193"):
+        for address in ("8.8.8.8", "192.168.1.1", "100.64.0.1"):
             item = replace(finding(Severity.MEDIUM), host=address)
             self.assertEqual(remediation_priority(item).value, "NORMAL")
             self.assertIsNone(item.to_dict()["risk_context"]["exposure"])

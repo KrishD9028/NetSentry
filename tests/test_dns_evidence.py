@@ -11,7 +11,7 @@ from netsentry.analysis.service_probes import _dns_query, _parse_dns_response, p
 from netsentry.main import _print_assessment
 from netsentry.scanning.models import HostScanResult, PortService
 
-HOST = "100.100.201.193"
+HOST = "192.0.2.53"
 
 
 def reply(query, flags=0x8180, answer=False):

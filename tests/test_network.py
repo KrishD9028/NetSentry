@@ -22,11 +22,11 @@ class NetworkParsingTests(unittest.TestCase):
                 from pathlib import Path
 
                 path = Path(directory) / "current.json"
-                save_current_snapshot([Device("100.100.201.202", None, None, "Unknown")], path)
-                save_current_snapshot([Device("100.100.201.201", None, None, "Unknown")], path)
+                save_current_snapshot([Device("192.0.2.202", None, None, "Unknown")], path)
+                save_current_snapshot([Device("192.0.2.201", None, None, "Unknown")], path)
                 devices = load_current_snapshot(path)
 
-        self.assertEqual([device.ip for device in devices], ["100.100.201.201"])
+        self.assertEqual([device.ip for device in devices], ["192.0.2.201"])
     def test_rfc1918_private_ranges_and_boundaries(self) -> None:
         for address in ("10.0.0.1", "10.255.255.254", "172.16.0.1", "172.31.255.254", "192.168.0.1", "192.168.255.254"):
             self.assertEqual(classify_ip(address), IPClassification.PRIVATE)
@@ -35,7 +35,7 @@ class NetworkParsingTests(unittest.TestCase):
 
     def test_shared_cgnat_range_and_boundaries(self) -> None:
         self.assertEqual(classify_ip("100.64.0.0"), IPClassification.SHARED_CGNAT)
-        self.assertEqual(classify_ip("100.100.201.201"), IPClassification.SHARED_CGNAT)
+        self.assertEqual(classify_ip("100.64.0.1"), IPClassification.SHARED_CGNAT)
         self.assertEqual(classify_ip("100.127.255.255"), IPClassification.SHARED_CGNAT)
         self.assertEqual(classify_ip("100.63.255.255"), IPClassification.PUBLIC)
         self.assertEqual(classify_ip("100.128.0.0"), IPClassification.PUBLIC)
@@ -45,7 +45,7 @@ class NetworkParsingTests(unittest.TestCase):
         self.assertEqual(classify_ip("169.254.1.1"), IPClassification.LINK_LOCAL)
         self.assertEqual(classify_ip("224.0.0.1"), IPClassification.MULTICAST)
         self.assertEqual(classify_ip("8.8.8.8"), IPClassification.PUBLIC)
-        self.assertEqual(ip_visibility("100.100.201.201"), "Shared/CGNAT IP")
+        self.assertEqual(ip_visibility("100.64.0.1"), "Shared/CGNAT IP")
 
     def test_locally_administered_mac_is_detected(self) -> None:
         self.assertTrue(_is_locally_administered_mac("ae:0a:9e:e0:c0:95"))

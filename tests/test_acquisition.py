@@ -204,7 +204,7 @@ def test_hypotheses_support_and_conflicts_never_vote_as_os_confirmation():
 
 def test_windows_compatible_services_are_hypothesis_not_confirmation():
     evidence = HostEvidence()
-    for attr, value, action, source in [('protocol_version', 'SMB 3.1.1', 'smb_metadata', 'smb'), ('netbios_name', 'KRISH', 'netbios_identity', 'netbios'), ('rpc_interface', 'uuid v1.0', 'rpc_identity', 'rpc')]:
+    for attr, value, action, source in [('protocol_version', 'SMB 3.1.1', 'smb_metadata', 'smb'), ('netbios_name', 'TESTHOST', 'netbios_identity', 'netbios'), ('rpc_interface', 'uuid v1.0', 'rpc_identity', 'rpc')]:
         evidence.add(observation(attr, value, source, action, source))
     refresh_hypotheses(evidence)
     result = evidence.resolve('operating_system')

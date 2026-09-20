@@ -13,7 +13,7 @@ from netsentry.analysis.models import (
 from netsentry.analysis.identity_resolution import IdentityResolver
 from netsentry.main import _print_assessment, _build_parser, _run_assess
 
-HOST = "100.100.201.201"
+HOST = "192.0.2.1"
 
 
 def observation(port, state="unknown", scanner=None, service=None, hint=None):
@@ -163,7 +163,7 @@ class ReportingTests(unittest.TestCase):
     @patch("netsentry.main.scan_target")
     def test_discovered_modes_consistent(self, scan, assess, snapshot):
         from netsentry.discovery.models import Device
-        snapshot.return_value = [Device(HOST, None, None, "Unknown"), Device("100.100.201.202", None, None, "Unknown")]
+        snapshot.return_value = [Device(HOST, None, None, "Unknown"), Device("192.0.2.2", None, None, "Unknown")]
         assess.return_value = windows_fixture()
         for flags, verbose in (([], False), (["-v"], True)):
             output = StringIO()

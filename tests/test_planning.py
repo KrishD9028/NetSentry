@@ -280,7 +280,7 @@ def test_live_windows_clues_do_not_promote_os_and_rpc_cannot_resolve_edition():
     target = replace(windows_fixture(), checks=(SecurityCheckResult('NS-CHECK-SMB', 'SMB', CheckStatus.COMPLETED, 445, 'tcp', 'smb', details={'dialect': 'SMB 3.1.1'}),),
                      software_evidence=({'product': 'SecureWindowsFileServer', 'version': '1.0', 'source': 'HTTP Server header', 'host': HOST, 'port': 8443},))
     evidence = collect_existing(target, scan())
-    for attribute, value in [('hostname', 'KRISH'), ('workgroup', 'WORKGROUP')]:
+    for attribute, value in [('hostname', 'TESTHOST'), ('workgroup', 'WORKGROUP')]:
         evidence.add(observation(attribute, value, 'Node status', 'netbios_identity', 'netbios', HOST + ':137/udp'))
     evidence.add(observation('rpc_annotation', 'Ngc Pop Key Service', 'RPC', 'rpc_identity', 'rpc', HOST + ':135/tcp'))
     evidence.attempts += [{'probe': 'netbios_identity', 'port': 137, 'status': 'COMPLETED'}, {'probe': 'rpc_identity', 'port': 135, 'status': 'COMPLETED'}]
@@ -393,7 +393,7 @@ def test_normal_cli_and_discovered_hosts_use_adaptive_planning(discovered):
     target = assessment(port(445, 'open', service='smb'))
     def probe(host, port, timeout):
         return IdentityProbeResult('COMPLETED', 'Node status collected',
-                                   (observation('hostname', 'KRISH', 'NetBIOS node status', 'netbios_identity', 'netbios', f'{host}:{port}/udp'),))
+                                   (observation('hostname', 'TESTHOST', 'NetBIOS node status', 'netbios_identity', 'netbios', f'{host}:{port}/udp'),))
     mock_probe = Mock(side_effect=probe)
     output = StringIO()
     flags = ['--discovered'] if discovered else [HOST]
@@ -402,7 +402,7 @@ def test_normal_cli_and_discovered_hosts_use_adaptive_planning(discovered):
     payload = json.loads(output.getvalue())
     host = payload['assessments'][0] if discovered else payload
     assert host['planning_trace']['planner'] == 'DeterministicPlanner'
-    assert host['host_identity']['attributes']['hostname']['value'] == 'KRISH'
+    assert host['host_identity']['attributes']['hostname']['value'] == 'TESTHOST'
     assert mock_probe.call_count == 1
 
 

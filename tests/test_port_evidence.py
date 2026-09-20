@@ -26,7 +26,7 @@ from netsentry.scanning.nmap import NmapClient, parse_nmap_xml
 from netsentry.scanning.scanner import scan_target, scan_targets
 
 
-HOST = "100.100.201.201"
+HOST = "192.0.2.1"
 SSH = SSHProbeData("SSH-2.0-OpenSSH_9.6", "2.0", {})
 TLS = TLSProbeData("TLSv1.3", "TLS_AES_256_GCM_SHA384", "test", "test", None, None, False, False)
 

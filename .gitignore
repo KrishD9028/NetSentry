@@ -16,6 +16,10 @@ venv/
 .env.*
 *.pem
 *.key
+*.p12
+*.pfx
+*.crt
+*.cer
 
 # NetSentry runtime data
 state/
@@ -24,3 +28,7 @@ data/
 !netsentry/data/cves.json
 logs/
 reports/
+*.log
+.coverage
+coverage.xml
+htmlcov/

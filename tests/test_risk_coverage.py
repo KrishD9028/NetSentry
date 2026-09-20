@@ -13,7 +13,7 @@ from netsentry.main import _network_assessment_payload, _print_assessment, _prin
 
 
 def retest_fixture():
-    host = "100.100.201.201"
+    host = "192.0.2.1"
     observations = tuple(
         AttackSurfaceObservation(
             host, port, "tcp", service, None, None, "Fixture evidence",
@@ -36,7 +36,7 @@ def retest_fixture():
 
 def finding(severity):
     return Finding("fixture", "Accepted test finding", "Fixture", severity, Confidence.HIGH,
-                   "100.100.201.201", "Accepted fixture evidence", "Fixture remediation", "fixture")
+                   "192.0.2.1", "Accepted fixture evidence", "Fixture remediation", "fixture")
 
 
 class CoverageTests(unittest.TestCase):
@@ -64,7 +64,7 @@ class CoverageTests(unittest.TestCase):
     def test_endpoint_key_includes_host_and_transport(self):
         base = retest_fixture()
         observation = base.observations[-1]
-        result = replace(base, observations=(observation, replace(observation, protocol="udp"), replace(observation, host="100.100.201.202")))
+        result = replace(base, observations=(observation, replace(observation, protocol="udp"), replace(observation, host="192.0.2.2")))
         self.assertEqual(result.coverage.open_ports, 3)
         self.assertEqual(result.coverage.confirmed_services, 3)
 
@@ -182,8 +182,8 @@ class RiskReportingTests(unittest.TestCase):
 
     def test_network_ranks_known_observed_risk_ahead_of_complete_zero(self):
         high = replace(retest_fixture(), findings=(finding(Severity.HIGH),))
-        clean = replace(retest_fixture(), host="100.100.201.202", status=AssessmentStatus.COMPLETE)
-        unknown = replace(retest_fixture(), host="100.100.201.203", checks=())
+        clean = replace(retest_fixture(), host="192.0.2.2", status=AssessmentStatus.COMPLETE)
+        unknown = replace(retest_fixture(), host="192.0.2.3", checks=())
         assessments = [clean, unknown, high]
         ranked = _network_assessment_payload(assessments)["network_summary"]["highest_risk_hosts"]
         self.assertEqual([row["host"] for row in ranked], [high.host, clean.host, unknown.host])
@@ -198,7 +198,7 @@ class RiskReportingTests(unittest.TestCase):
 
     def test_network_critical_findings_are_counted_and_ranked_first(self):
         critical = replace(retest_fixture(), findings=(finding(Severity.CRITICAL),))
-        high = replace(retest_fixture(), host="100.100.201.202", findings=(finding(Severity.HIGH),))
+        high = replace(retest_fixture(), host="192.0.2.2", findings=(finding(Severity.HIGH),))
         output = self.render(_print_network_assessment_summary, [high, critical])
         self.assertIn("CRITICAL: 1", output)
         self.assertLess(output.index(critical.host), output.index(high.host))
